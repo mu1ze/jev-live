@@ -4,12 +4,19 @@ const $ = id => document.getElementById(id);
 const video=$('video'), photo=$('photo'), stage=$('stage');
 const frame=new FrameState(4000), rate=new CompletionRate(5000);
 let running=false, pending=false, timer=null, stream=null, uploaded=null, photoURL=null;
-let sourceWidth=1, sourceHeight=1, serverKey=false, lastRender='', lastCapture=null;
+let sourceWidth=1, sourceHeight=1, serverKey=false, lastCapture=null;
+const boxNodes=new Map();
+function text(id,value) { if($(id).textContent!==value) $(id).textContent=value; }
+function style(node,key,value) { if(node.style[key]!==value) node.style[key]=value; }
 let failures=0, retryAt=0;
 function backoff() { failures=Math.min(failures+1,5); retryAt=performance.now()+Math.min(30000,3000*2**(failures-1)); }
 
-function status(text, kind='') { $('status').textContent=text; $('badge').className=`state-badge ${kind}`; }
-function clearBoxes() { frame.items=[]; $('boxes').replaceChildren(); $('count').textContent='0'; lastRender=''; $('age').textContent='—'; $('results').textContent='No detections yet. Boxes are snapshots, not tracking.'; }
+function status(message, kind='') { text('status',message); const name=`state-badge ${kind}`; if($('badge').className!==name) $('badge').className=name; }
+function liveStatus() {
+  if(document.hidden) return;
+  status('Camera live','live'); text('stage-note','LIVE PREVIEW · SNAPSHOT DETECTION · BOX TTL 4s');
+}
+function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('age','—'); text('results','No detections yet. Boxes are snapshots, not tracking.'); }
 function reset() { frame.reset(); rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
 function fail(message) { clearBoxes(); $('error').textContent=message; $('error').hidden=false; status('Needs attention'); }
 function clearError() { $('error').hidden=true; $('error').textContent=''; }
@@ -21,7 +28,7 @@ function credentials() {
 }
 function updateButtons() { $('start').disabled=running; $('analyze').disabled=!uploaded || pending || running; }
 function stop() {
-  running=false; reset();
+  running=false; reset(); $('results').setAttribute('aria-busy','false');
   if(stream) stream.getTracks().forEach(track=>track.stop());
   stream=null; video.srcObject=null;
   $('empty').hidden=!!uploaded; video.hidden=true; photo.hidden=!uploaded;
@@ -29,12 +36,14 @@ function stop() {
   $('stage-note').textContent='STOPPED · NO NEW FRAMES SENT';
   status('Stopped'); clearError(); updateButtons();
 }
+const snapshotCanvas=document.createElement('canvas');
+const snapshotContext=snapshotCanvas.getContext('2d');
 function snapshot(source,w,h) {
   const size=snapshotSize(w,h);
-  const canvas=document.createElement('canvas');
-  canvas.width=size.width; canvas.height=size.height;
-  canvas.getContext('2d').drawImage(source,0,0,canvas.width,canvas.height);
-  return canvas.toDataURL('image/jpeg',.82).split(',')[1];
+  if(snapshotCanvas.width!==size.width) snapshotCanvas.width=size.width;
+  if(snapshotCanvas.height!==size.height) snapshotCanvas.height=size.height;
+  snapshotContext.drawImage(source,0,0,size.width,size.height);
+  return snapshotCanvas.toDataURL('image/jpeg',.82).split(',')[1];
 }
 function schedule() {
   clearTimeout(timer);
@@ -57,8 +66,9 @@ async function detect(single) {
     payload.image=snapshot(source,sourceWidth,sourceHeight); payload.format='jpg';
   } catch(e) { backoff(); fail(e.message); schedule(); return; }
   const captured=performance.now(); lastCapture=captured;
-  pending=true; updateButtons(); clearError(); status('Asking Jev…','busy');
-  $('stage-note').textContent=single?'ANALYZING SELECTED IMAGE':'LIVE PREVIEW · ANALYZING SNAPSHOT';
+  pending=true; updateButtons(); clearError(); $('results').setAttribute('aria-busy','true');
+  if(single) {status('Asking Jev…','busy');text('stage-note','ANALYZING SELECTED IMAGE');}
+  else liveStatus();
   const controller=new AbortController();
   const timeout=setTimeout(()=>controller.abort(),28000);
   try {
@@ -72,15 +82,18 @@ async function detect(single) {
     if(!single) rate.record(now);
     $('latency').textContent=`${((now-captured)/1000).toFixed(2)} s`;
     if(frame.accept(epoch,data.detections,captured,now)) {
-      status(single?'Image analyzed':'Camera live','live');
-      $('stage-note').textContent='SNAPSHOT RESULT · EXPIRES 4s AFTER CAPTURE';
+      if(single) {status('Image analyzed','live');text('stage-note','SNAPSHOT RESULT · EXPIRES 4s AFTER CAPTURE');}
+      else liveStatus();
       render(true);
-    } else {clearBoxes();status('Result too old');$('stage-note').textContent='RESULT EXPIRED · PREVIEW IS NOT TRACKING';}
+    } else {
+      clearBoxes();
+      if(single) {status('Result too old');text('stage-note','RESULT EXPIRED · PREVIEW IS NOT TRACKING');}
+    }
   } catch(e) {
     backoff();
     if(epoch===frame.epoch) fail(e.name==='AbortError'?'Request timed out. Automatic retries are slowed down.':(e.message || 'Connection failed. Try again.'));
   } finally {
-    clearTimeout(timeout); payload.key=''; pending=false; updateButtons();
+    clearTimeout(timeout); payload.key=''; pending=false; $('results').setAttribute('aria-busy','false'); updateButtons();
     if(running) schedule();
   }
 }
@@ -95,8 +108,7 @@ async function start() {
     stream=next; video.srcObject=stream; video.hidden=false; photo.hidden=true; $('empty').hidden=true;
     await video.play();
     if(epoch!==frame.epoch || !running) return;
-    $('source-label').textContent='LIVE CAMERA'; status('Camera live','live');
-    $('stage-note').textContent='LIVE PREVIEW · SNAPSHOT DETECTION';
+    $('source-label').textContent='LIVE CAMERA'; liveStatus();
     stream.getVideoTracks()[0].addEventListener('ended',()=>{if(running){stop();fail('Camera disconnected. Reconnect and Start again.');}});
     detect(false);
   } catch(e) {
@@ -126,29 +138,34 @@ async function upload() {
   } catch(e) {if(epoch===frame.epoch) fail(e.message || 'Could not decode that image.');}
   finally {if(photoURL!==url) URL.revokeObjectURL(url);}
 }
-function render(force=false) {
+function render() {
   const now=performance.now(); const items=frame.visible(now,Number($('confidence').value));
-  $('rate').textContent=`${rate.value(now).toFixed(1)} /s`;
-  const rect=stage.getBoundingClientRect();
-  const signature=JSON.stringify([items,rect.width,rect.height]);
-  if(force || signature!==lastRender) {
-    lastRender=signature; $('boxes').replaceChildren();
-    for(const detection of items) {
-      const box=document.createElement('div'); box.className='box';
-      const dims=projectBox(detection.box,sourceWidth,sourceHeight,rect.width,rect.height);
-      for(const [k,v] of Object.entries(dims)) box.style[k]=`${v}px`;
-      const label=document.createElement('span');label.className='box-label';
-      label.textContent=`${detection.label} · ${Math.round(detection.confidence*100)}%`;
-      if(dims.top<27) {label.style.bottom='auto';label.style.top='0';}
-      box.append(label);$('boxes').append(box);
-    }
-    $('count').textContent=String(items.length);
-    $('results').textContent=items.length?items.map(d=>`${d.label} · ${Math.round(d.confidence*100)}%`).join('   /   '):frame.captured?'No fresh detections above threshold.':'No detections yet. Boxes are snapshots, not tracking.';
+  text('rate',`${rate.value(now).toFixed(1)} /s`);
+  const visible=new Set(items.map(d=>d.label));
+  for(const [label,node] of boxNodes) {
+    if(!visible.has(label)) {node.remove();boxNodes.delete(label);}
   }
+  const rect=items.length?stage.getBoundingClientRect():null;
+  for(const detection of items) {
+    let box=boxNodes.get(detection.label);
+    if(!box) {
+      box=document.createElement('div'); box.className='box';
+      const label=document.createElement('span'); label.className='box-label';
+      box.append(label); boxNodes.set(detection.label,box); $('boxes').append(box);
+    }
+    const dims=projectBox(detection.box,sourceWidth,sourceHeight,rect.width,rect.height);
+    for(const [k,v] of Object.entries(dims)) style(box,k,`${v}px`);
+    const label=box.firstChild;
+    const caption=`${detection.label} · ${Math.round(detection.confidence*100)}%`;
+    if(label.textContent!==caption) label.textContent=caption;
+    style(label,'bottom',dims.top<27?'auto':''); style(label,'top',dims.top<27?'0px':'');
+  }
+  text('count',String(items.length));
+  text('results',items.length?items.map(d=>`${d.label} · ${Math.round(d.confidence*100)}%`).join('   /   '):frame.captured?'No fresh detections above threshold.':'No detections yet. Boxes are snapshots, not tracking.');
   if(frame.captured) {
     const age=now-frame.captured;
-    $('age').textContent=age<frame.ttl?`${(age/1000).toFixed(1)} s`:'Expired';
-    if(age>=frame.ttl && !pending) $('stage-note').textContent='BOXES EXPIRED · NO TRACKING';
+    text('age',age<frame.ttl?`${(age/1000).toFixed(1)} s`:'Expired');
+    if(age>=frame.ttl && !pending && !running) text('stage-note','BOXES EXPIRED · NO TRACKING');
   }
 }
 $('start').addEventListener('click',start);
@@ -160,7 +177,7 @@ $('key').addEventListener('input',()=>{stop();});
 $('labels').addEventListener('input',()=>{
   if(running && !stream) {stop();status('Targets updated · Start camera');return;}
   reset();clearError();
-  if(running){status(pending?'Waiting for previous request…':'Targets updated','live');if(!pending)schedule();}
+  if(running){liveStatus();if(!pending)schedule();}
 });
 $('confidence').addEventListener('input',()=>{$('confidence-value').value=`${Math.round(Number($('confidence').value)*100)}%`;render(true);});
 $('cadence').addEventListener('change',()=>{if(running && !pending)schedule();});
@@ -168,7 +185,7 @@ document.addEventListener('visibilitychange',()=>{
   clearTimeout(timer); timer=null;
   if(running) {
     if(document.hidden) {status('Paused · tab hidden');$('stage-note').textContent='TAB HIDDEN · NEW SNAPSHOTS PAUSED';}
-    else schedule();
+    else {liveStatus();schedule();}
   }
 });
 window.addEventListener('pagehide',stop);
