@@ -7,7 +7,7 @@ export class PixelTracker {
   }
   dispose() { for(const f of this.frames) f.gray.delete(); this.frames=[]; this.tracks.clear(); }
   snapshot() { return [...this.tracks.values()].map(t=>({id:t.id,label:t.label,box:[t.box[0]/this.width,t.box[1]/this.height,t.box[2]/this.width,t.box[3]/this.height],points:t.points.length,confidence:t.confidence})); }
-  lose(t,reason,frameId) { this.tracks.delete(t.id); this.events.push({id:t.id,reason,frameId}); }
+  lose(t,reason,frameId) { this.tracks.delete(t.id); this.events.push({id:t.id,reason,frameId}); if(this.events.length>128) this.events.splice(0,this.events.length-128); }
   push(imageData, frameId, timestampMs) {
     const cv=this.cv, rgba=cv.matFromImageData(imageData), gray=new cv.Mat();
     cv.cvtColor(rgba,gray,cv.COLOR_RGBA2GRAY); rgba.delete();
@@ -54,12 +54,18 @@ export class PixelTracker {
       const b=d.box;
       if(!Array.isArray(b)||b.length!==4||!b.every(Number.isFinite)||b[0]<0||b[1]<0||b[2]<=0||b[3]<=0||b[0]+b[2]>1.000001||b[1]+b[3]>1.000001||this.tracks.size>=this.maxTracks) { rejected.push({label:d.label,reason:'invalid-box-or-capacity'}); continue; }
       const box=[b[0]*this.width,b[1]*this.height,b[2]*this.width,b[3]*this.height];
-      const mask=cv.Mat.zeros(this.height,this.width,cv.CV_8UC1), corners=new cv.Mat();
-      // Interior only: do not accidentally seed background/bounding-rectangle corners on blank objects.
+      // Interior only: OpenCV normalizes reversed rectangle endpoints, so reject tiny interiors first.
       const inset=Math.max(8,Math.min(box[2],box[3])*.15);
-      cv.rectangle(mask,new cv.Point(Math.ceil(box[0]+inset),Math.ceil(box[1]+inset)),new cv.Point(Math.floor(box[0]+box[2]-inset),Math.floor(box[1]+box[3]-inset)),new cv.Scalar(255),-1);
+      const left=Math.max(0,Math.ceil(box[0]+inset)), top=Math.max(0,Math.ceil(box[1]+inset));
+      const right=Math.min(this.width-1,Math.floor(box[0]+box[2]-inset)), bottom=Math.min(this.height-1,Math.floor(box[1]+box[3]-inset));
+      if(left>=right||top>=bottom) { rejected.push({label:d.label,reason:'insufficient-texture'}); continue; }
+      const mask=cv.Mat.zeros(this.height,this.width,cv.CV_8UC1), corners=new cv.Mat();
+      cv.rectangle(mask,new cv.Point(left,top),new cv.Point(right,bottom),new cv.Scalar(255),-1);
       cv.goodFeaturesToTrack(this.frames[i].gray,corners,60,.02,4,mask,3,false,.04);
-      const points=[]; for(let k=0;k<corners.rows;k++) points.push([corners.data32F[2*k],corners.data32F[2*k+1]]);
+      const points=[]; for(let k=0;k<corners.rows;k++) {
+        const x=corners.data32F[2*k], y=corners.data32F[2*k+1];
+        if(x>box[0]&&y>box[1]&&x<box[0]+box[2]&&y<box[1]+box[3]&&x>0&&y>0&&x<this.width&&y<this.height) points.push([x,y]);
+      }
       mask.delete(); corners.delete();
       if(points.length<6) { rejected.push({label:d.label,reason:'insufficient-texture'}); continue; }
       const t={id:`track-${++this.serial}`,label:d.label,box,points,seedTimestampMs:this.frames[i].timestampMs}; this.tracks.set(t.id,t); fresh.push(t); accepted.push(t.id);

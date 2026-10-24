@@ -1,4 +1,5 @@
 import {CompletionRate, FrameState, projectBox, snapshotSize} from './core.mjs';
+import {TrackingClient} from './tracking-client.mjs';
 
 const $ = id => document.getElementById(id);
 const video=$('video'), photo=$('photo'), stage=$('stage');
@@ -6,6 +7,8 @@ const frame=new FrameState(4000), rate=new CompletionRate(5000);
 let running=false, pending=false, timer=null, stream=null, uploaded=null, photoURL=null;
 let sourceWidth=1, sourceHeight=1, serverKey=false, lastCapture=null;
 const boxNodes=new Map();
+const tracking=new TrackingClient(reason=>{if(reason==='failure'){frame.reset();clearBoxes();}if(running)render();});
+let sampleTimer=null, lastSample=0, lastVideoFrame=-1;
 function text(id,value) { if($(id).textContent!==value) $(id).textContent=value; }
 function style(node,key,value) { if(node.style[key]!==value) node.style[key]=value; }
 let failures=0, retryAt=0;
@@ -14,10 +17,10 @@ function backoff() { failures=Math.min(failures+1,5); retryAt=performance.now()+
 function status(message, kind='') { text('status',message); const name=`state-badge ${kind}`; if($('badge').className!==name) $('badge').className=name; }
 function liveStatus() {
   if(document.hidden) return;
-  status('Camera live','live'); text('stage-note','LIVE PREVIEW · SNAPSHOT DETECTION · BOX TTL 4s');
+  status('Camera live','live'); text('stage-note',`LIVE PREVIEW · ${tracking.state.toUpperCase()}`);
 }
-function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('age','—'); text('results','No detections yet. Boxes are snapshots, not tracking.'); }
-function reset() { frame.reset(); rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
+function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('age','—'); text('results','No detections yet. Camera mode can track visually supported objects.'); }
+function reset() { frame.reset();tracking.engaged=false;tracking.reset();lastVideoFrame=-1; rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
 function fail(message) { clearBoxes(); $('error').textContent=message; $('error').hidden=false; status('Needs attention'); }
 function clearError() { $('error').hidden=true; $('error').textContent=''; }
 function credentials() {
@@ -28,7 +31,7 @@ function credentials() {
 }
 function updateButtons() { $('start').disabled=running; $('analyze').disabled=!uploaded || pending || running; }
 function stop() {
-  running=false; reset(); $('results').setAttribute('aria-busy','false');
+  running=false; clearInterval(sampleTimer);sampleTimer=null;tracking.close();reset(); $('results').setAttribute('aria-busy','false');
   if(stream) stream.getTracks().forEach(track=>track.stop());
   stream=null; video.srcObject=null;
   $('empty').hidden=!!uploaded; video.hidden=true; photo.hidden=!uploaded;
@@ -39,11 +42,23 @@ function stop() {
 const snapshotCanvas=document.createElement('canvas');
 const snapshotContext=snapshotCanvas.getContext('2d');
 function snapshot(source,w,h) {
+  drawSnapshot(source,w,h);
+  return snapshotCanvas.toDataURL('image/jpeg',.82).split(',')[1];
+}
+function drawSnapshot(source,w,h) {
   const size=snapshotSize(w,h);
   if(snapshotCanvas.width!==size.width) snapshotCanvas.width=size.width;
   if(snapshotCanvas.height!==size.height) snapshotCanvas.height=size.height;
   snapshotContext.drawImage(source,0,0,size.width,size.height);
-  return snapshotCanvas.toDataURL('image/jpeg',.82).split(',')[1];
+}
+function sample() {
+  if(!running||document.hidden||!tracking.ready||tracking.busy||video.readyState<2)return;
+  const now=performance.now();
+  if(now-lastSample<65)return;
+  const mediaFrame=video.getVideoPlaybackQuality().totalVideoFrames;
+  if(mediaFrame===lastVideoFrame)return;
+  try {drawSnapshot(video,video.videoWidth,video.videoHeight);tracking.push(snapshotCanvas,snapshotContext,now);lastSample=now;lastVideoFrame=mediaFrame;}
+  catch {tracking.failure();}
 }
 function schedule() {
   clearTimeout(timer);
@@ -54,9 +69,11 @@ function schedule() {
 }
 async function detect(single) {
   if(pending || (!single && (!running || document.hidden))) return;
+  if(!single&&tracking.worker&&!tracking.ready){clearTimeout(timer);timer=setTimeout(()=>detect(false),50);return;}
+  if(!single&&tracking.ready&&(tracking.busy||video.getVideoPlaybackQuality().totalVideoFrames===lastVideoFrame)){clearTimeout(timer);timer=setTimeout(()=>detect(false),10);return;}
   if(!single && performance.now()<retryAt) {schedule();return;}
   const epoch=frame.epoch;
-  let payload;
+  let payload,capture=null;
   try {
     payload=credentials();
     if(!single && video.readyState<2) { schedule(); return; }
@@ -64,6 +81,10 @@ async function detect(single) {
     sourceWidth=single?photo.naturalWidth:video.videoWidth;
     sourceHeight=single?photo.naturalHeight:video.videoHeight;
     payload.image=snapshot(source,sourceWidth,sourceHeight); payload.format='jpg';
+    if(!single&&tracking.ready) {
+      const mediaFrame=video.getVideoPlaybackQuality().totalVideoFrames;
+      if(mediaFrame!==lastVideoFrame){capture=tracking.push(snapshotCanvas,snapshotContext,performance.now());lastSample=performance.now();lastVideoFrame=mediaFrame;}
+    }
   } catch(e) { backoff(); fail(e.message); schedule(); return; }
   const captured=performance.now(); lastCapture=captured;
   pending=true; updateButtons(); clearError(); $('results').setAttribute('aria-busy','true');
@@ -82,16 +103,21 @@ async function detect(single) {
     if(!single) rate.record(now);
     $('latency').textContent=`${((now-captured)/1000).toFixed(2)} s`;
     if(frame.accept(epoch,data.detections,captured,now)) {
+      if(!single)tracking.seed(capture,data.detections,Number($('confidence').value));
       if(single) {status('Image analyzed','live');text('stage-note','SNAPSHOT RESULT · EXPIRES 4s AFTER CAPTURE');}
       else liveStatus();
       render(true);
     } else {
-      clearBoxes();
+      if(single||!tracking.current(now).length)clearBoxes();
       if(single) {status('Result too old');text('stage-note','RESULT EXPIRED · PREVIEW IS NOT TRACKING');}
     }
   } catch(e) {
     backoff();
-    if(epoch===frame.epoch) fail(e.name==='AbortError'?'Request timed out. Automatic retries are slowed down.':(e.message || 'Connection failed. Try again.'));
+    if(epoch===frame.epoch) {
+      const message=e.name==='AbortError'?'Request timed out. Automatic retries are slowed down.':(e.message || 'Connection failed. Try again.');
+      if(!single&&tracking.current(performance.now()).length){text('error',message);$('error').hidden=false;liveStatus();}
+      else fail(message);
+    }
   } finally {
     clearTimeout(timeout); payload.key=''; pending=false; $('results').setAttribute('aria-busy','false'); updateButtons();
     if(running) schedule();
@@ -109,6 +135,7 @@ async function start() {
     await video.play();
     if(epoch!==frame.epoch || !running) return;
     $('source-label').textContent='LIVE CAMERA'; liveStatus();
+    tracking.start();sampleTimer=setInterval(sample,20);
     stream.getVideoTracks()[0].addEventListener('ended',()=>{if(running){stop();fail('Camera disconnected. Reconnect and Start again.');}});
     detect(false);
   } catch(e) {
@@ -139,29 +166,34 @@ async function upload() {
   finally {if(photoURL!==url) URL.revokeObjectURL(url);}
 }
 function render() {
-  const now=performance.now(); const items=frame.visible(now,Number($('confidence').value));
+  const now=performance.now();
+  const tracks=running&&!document.hidden?tracking.current(now):[];
+  const items=running&&document.hidden?[]:tracks.length||running&&tracking.engaged&&tracking.ready?tracks:frame.visible(now,Number($('confidence').value));
+  if(running&&!document.hidden)liveStatus();
   text('rate',`${rate.value(now).toFixed(1)} /s`);
-  const visible=new Set(items.map(d=>d.label));
+  const visible=new Set(items.map(d=>d.id||d.label));
   for(const [label,node] of boxNodes) {
     if(!visible.has(label)) {node.remove();boxNodes.delete(label);}
   }
   const rect=items.length?stage.getBoundingClientRect():null;
   for(const detection of items) {
-    let box=boxNodes.get(detection.label);
+    const key=detection.id||detection.label;
+    let box=boxNodes.get(key);
     if(!box) {
       box=document.createElement('div'); box.className='box';
       const label=document.createElement('span'); label.className='box-label';
-      box.append(label); boxNodes.set(detection.label,box); $('boxes').append(box);
+      box.append(label); boxNodes.set(key,box); $('boxes').append(box);
+      if(detection.tracked)box.dataset.trackId=detection.id;
     }
     const dims=projectBox(detection.box,sourceWidth,sourceHeight,rect.width,rect.height);
     for(const [k,v] of Object.entries(dims)) style(box,k,`${v}px`);
     const label=box.firstChild;
-    const caption=`${detection.label} · ${Math.round(detection.confidence*100)}%`;
+    const caption=`${detection.label} · ${Math.round(detection.confidence*100)}% recognition${detection.tracked?' · pixel tracking':' · snapshot'}`;
     if(label.textContent!==caption) label.textContent=caption;
     style(label,'bottom',dims.top<27?'auto':''); style(label,'top',dims.top<27?'0px':'');
   }
   text('count',String(items.length));
-  text('results',items.length?items.map(d=>`${d.label} · ${Math.round(d.confidence*100)}%`).join('   /   '):frame.captured?'No fresh detections above threshold.':'No detections yet. Boxes are snapshots, not tracking.');
+  text('results',items.length?items.map(d=>`${d.label} · ${Math.round(d.confidence*100)}% recognition · ${d.tracked?'pixel tracking':'snapshot only'}`).join('   /   '):frame.captured?'No fresh detections above threshold.':'No detections yet. Camera mode can track visually supported objects.');
   if(frame.captured) {
     const age=now-frame.captured;
     text('age',age<frame.ttl?`${(age/1000).toFixed(1)} s`:'Expired');
@@ -184,7 +216,7 @@ $('cadence').addEventListener('change',()=>{if(running && !pending)schedule();})
 document.addEventListener('visibilitychange',()=>{
   clearTimeout(timer); timer=null;
   if(running) {
-    if(document.hidden) {status('Paused · tab hidden');$('stage-note').textContent='TAB HIDDEN · NEW SNAPSHOTS PAUSED';}
+    if(document.hidden) {frame.reset();tracking.reset();clearBoxes();status('Paused · tab hidden');$('stage-note').textContent='TAB HIDDEN · NEW SNAPSHOTS PAUSED';}
     else {liveStatus();schedule();}
   }
 });
