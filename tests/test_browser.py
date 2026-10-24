@@ -15,6 +15,8 @@ class BrowserTests(unittest.TestCase):
         with harness.running(transport=lambda req: {'answers': {}}), sync_playwright() as pw:
             browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream'])
             page=browser.new_page(permissions=['camera'])
+            # Explicit snapshot-fallback regression: fake camera texture is not an object.
+            page.route('**/tracking-worker.js',lambda route:route.abort())
             page.add_init_script("""
                 const realFetch=window.fetch;
                 window.fetch=(url,options)=>String(url).endsWith('api/detect') ? new Promise(resolve=>{
@@ -28,6 +30,8 @@ class BrowserTests(unittest.TestCase):
                 page.evaluate('(items)=>window.reply(items)', [] if box is None else [{'label':'coffee mug','confidence':confidence,'box':box}])
             answer(.88,dict(left=.1,right=.7,top=.2,bottom=.8))
             page.wait_for_function("() => document.querySelector('.box-label')?.textContent.includes('88%')")
+            self.assertIn('snapshot',page.locator('.box-label').inner_text())
+            self.assertEqual(page.locator('.box[data-track-id]').count(),0)
             page.evaluate("window.firstBox=document.querySelector('.box')")
             answer(.91,dict(left=.2,right=.6,top=.1,bottom=.5))
             page.wait_for_function("() => document.querySelector('.box-label')?.textContent.includes('91%')")
@@ -88,7 +92,7 @@ class BrowserTests(unittest.TestCase):
             statuses=page.evaluate('window.statuses');notes=page.evaluate('window.notes')
             self.assertGreaterEqual(len(calls),8)
             self.assertEqual(statuses[statuses.index('Camera live'):],['Camera live'])
-            live_note='LIVE PREVIEW · SNAPSHOT DETECTION · BOX TTL 4s'
+            live_note='LIVE PREVIEW · NO SUPPORTED PIXEL TRACKS · SNAPSHOT DETECTION'
             self.assertEqual(notes[notes.index(live_note):],[live_note])
             self.assertEqual(page.locator('#status').get_attribute('role'),'status')
             self.assertIn(page.locator('#results').get_attribute('aria-busy'),['true','false'])
@@ -225,7 +229,8 @@ class BrowserTests(unittest.TestCase):
             page.add_init_script("window.fixtureHidden=false;Object.defineProperty(document,'hidden',{get:()=>window.fixtureHidden});")
             page.goto(f'http://127.0.0.1:{harness.port}/');page.locator('#key').fill('fixture-secret')
             page.locator('#cadence').select_option('0');page.locator('#start').click()
-            page.wait_for_timeout(500)
+            deadline=time.monotonic()+4
+            while len(calls)<2 and time.monotonic()<deadline:page.wait_for_timeout(50)
             self.assertGreaterEqual(len(calls),2,'Auto should run continuous serial requests')
             page.evaluate("window.fixtureHidden=true;document.dispatchEvent(new Event('visibilitychange'))")
             count=len(calls);page.wait_for_timeout(600)
@@ -253,7 +258,10 @@ class BrowserTests(unittest.TestCase):
             self.assertNotIn('fixture-server-only-secret',page.content())
             self.assertEqual(page.locator('#key').input_value(),'')
             self.assertEqual(calls,[])
-            page.locator('#start').click();page.wait_for_timeout(400);page.locator('#stop').click()
+            page.locator('#start').click()
+            deadline=__import__('time').monotonic()+4
+            while not calls and __import__('time').monotonic()<deadline:page.wait_for_timeout(50)
+            page.locator('#stop').click();page.wait_for_timeout(150)
             self.assertTrue(calls)
             self.assertEqual(calls[0],'Bearer fixture-server-only-secret')
             browser.close()
