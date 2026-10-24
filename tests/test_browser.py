@@ -10,6 +10,148 @@ except ImportError:
 
 @unittest.skipIf(sync_playwright is None, 'Install optional playwright to run real browser tests')
 class BrowserTests(unittest.TestCase):
+    def test_live_boxes_reuse_nodes_and_apply_only_latest_truthful_geometry(self):
+        harness=server_tests.HTTPTests()
+        with harness.running(transport=lambda req: {'answers': {}}), sync_playwright() as pw:
+            browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream'])
+            page=browser.new_page(permissions=['camera'])
+            page.add_init_script("""
+                const realFetch=window.fetch;
+                window.fetch=(url,options)=>String(url).endsWith('api/detect') ? new Promise(resolve=>{
+                    window.reply=detections=>{window.reply=null;resolve(new Response(JSON.stringify({detections}),{status:200}));};
+                }) : realFetch(url,options);
+            """)
+            page.goto(f'http://127.0.0.1:{harness.port}/');page.locator('#key').fill('fixture-secret')
+            page.locator('#labels').fill('coffee mug');page.locator('#start').click()
+            def answer(confidence, box=None):
+                page.wait_for_function('() => !!window.reply')
+                page.evaluate('(items)=>window.reply(items)', [] if box is None else [{'label':'coffee mug','confidence':confidence,'box':box}])
+            answer(.88,dict(left=.1,right=.7,top=.2,bottom=.8))
+            page.wait_for_function("() => document.querySelector('.box-label')?.textContent.includes('88%')")
+            page.evaluate("window.firstBox=document.querySelector('.box')")
+            answer(.91,dict(left=.2,right=.6,top=.1,bottom=.5))
+            page.wait_for_function("() => document.querySelector('.box-label')?.textContent.includes('91%')")
+            self.assertTrue(page.evaluate("window.firstBox===document.querySelector('.box')"),'Confidence/position updates must retain the exact target node')
+            geometry=page.evaluate("""() => {
+                const b=document.querySelector('.box'),s=document.querySelector('#stage').getBoundingClientRect(),v=document.querySelector('video');
+                const scale=Math.min(s.width/v.videoWidth,s.height/v.videoHeight);
+                const w=v.videoWidth*scale,h=v.videoHeight*scale;
+                return {actual:['left','top','width','height'].map(k=>parseFloat(b.style[k])),
+                    expected:[(s.width-w)/2+.2*w,(s.height-h)/2+.1*h,.4*w,.4*h],
+                    transition:getComputedStyle(b).transitionDuration,animations:b.getAnimations().length};
+            }""")
+            for actual,expected in zip(geometry['actual'],geometry['expected']):self.assertAlmostEqual(actual,expected,delta=.01)
+            self.assertEqual(geometry['transition'],'0s');self.assertEqual(geometry['animations'],0)
+            page.evaluate("""() => {
+                window.unchangedMutations=0;
+                window.unchangedObserver=new MutationObserver(records=>window.unchangedMutations+=records.length);
+                for(const id of ['boxes','results','count'])window.unchangedObserver.observe(document.getElementById(id),{subtree:true,attributes:id==='boxes',childList:true,characterData:true});
+            }""")
+            answer(.91,dict(left=.2,right=.6,top=.1,bottom=.5))
+            page.wait_for_timeout(125)
+            self.assertEqual(page.evaluate('window.unchangedMutations'),0,'Identical visible data must not rewrite geometry, labels or results')
+            page.evaluate('window.unchangedObserver.disconnect()')
+            answer(0)
+            page.wait_for_function("() => !document.querySelector('.box')")
+            answer(.88,dict(left=.1,right=.7,top=.2,bottom=.8))
+            page.wait_for_function("() => !!document.querySelector('.box')")
+            page.locator('#confidence').fill('0.95')
+            self.assertEqual(page.locator('.box').count(),0)
+            page.locator('#confidence').fill('0.7')
+            page.wait_for_function("() => !!document.querySelector('.box')")
+            # Leave the next request unresolved: TTL must still be capture-time based.
+            page.wait_for_function("() => document.querySelector('#age').textContent==='Expired'",timeout=5500)
+            self.assertEqual(page.locator('.box').count(),0)
+            page.locator('#stop').click();self.assertEqual(page.locator('.box').count(),0)
+            if page.evaluate('!!window.reply'):page.evaluate('window.reply([])')
+            browser.close()
+
+    def test_live_status_and_stage_note_stay_calm_across_requests(self):
+        import time
+        harness=server_tests.HTTPTests(); calls=[]
+        def fixture(req):
+            calls.append(time.monotonic());time.sleep(.06)
+            return {'answers': {}}
+        with harness.running(transport=fixture), sync_playwright() as pw:
+            browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream'])
+            page=browser.new_page(permissions=['camera'])
+            page.goto(f'http://127.0.0.1:{harness.port}/');page.locator('#key').fill('fixture-secret')
+            page.evaluate("""() => {
+                window.statuses=[];window.notes=[];
+                new MutationObserver(()=>window.statuses.push(document.querySelector('#status').textContent)).observe(document.querySelector('#status'),{childList:true,subtree:true});
+                new MutationObserver(()=>window.notes.push(document.querySelector('#stage-note').textContent)).observe(document.querySelector('#stage-note'),{childList:true,subtree:true});
+            }""")
+            page.locator('#start').click()
+            deadline=time.monotonic()+4
+            while len(calls)<8 and time.monotonic()<deadline:page.wait_for_timeout(50)
+            page.wait_for_timeout(100)
+            statuses=page.evaluate('window.statuses');notes=page.evaluate('window.notes')
+            self.assertGreaterEqual(len(calls),8)
+            self.assertEqual(statuses[statuses.index('Camera live'):],['Camera live'])
+            live_note='LIVE PREVIEW · SNAPSHOT DETECTION · BOX TTL 4s'
+            self.assertEqual(notes[notes.index(live_note):],[live_note])
+            self.assertEqual(page.locator('#status').get_attribute('role'),'status')
+            self.assertIn(page.locator('#results').get_attribute('aria-busy'),['true','false'])
+            print(f'8-result fixture status mutations={len(statuses)}, stage mutations={len(notes)}',flush=True)
+            page.locator('#stop').click();page.wait_for_timeout(150)
+            self.assertEqual(page.locator('#results').get_attribute('aria-busy'),'false')
+            browser.close()
+
+    def test_snapshots_reuse_one_canvas_context_and_resize_only_on_size_change(self):
+        harness=server_tests.HTTPTests(); calls=[]
+        def fixture(req):
+            calls.append(req)
+            return {'answers': {}}
+        with harness.running(transport=fixture), sync_playwright() as pw:
+            browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream'])
+            page=browser.new_page(permissions=['camera'])
+            page.add_init_script("""
+                window.canvasStats={created:0,contexts:0,sizes:[]};
+                const create=document.createElement.bind(document);
+                document.createElement=(name,...args)=>{if(name==='canvas')window.canvasStats.created++;return create(name,...args);};
+                const context=HTMLCanvasElement.prototype.getContext;
+                HTMLCanvasElement.prototype.getContext=function(...args){window.canvasStats.contexts++;return context.apply(this,args);};
+                for(const key of ['width','height']) {
+                    const descriptor=Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype,key);
+                    Object.defineProperty(HTMLCanvasElement.prototype,key,{...descriptor,set(value){window.canvasStats.sizes.push([key,value]);descriptor.set.call(this,value);}});
+                }
+            """)
+            page.goto(f'http://127.0.0.1:{harness.port}/');page.locator('#key').fill('fixture-secret');page.locator('#start').click()
+            import time
+            deadline=time.monotonic()+4
+            while len(calls)<5 and time.monotonic()<deadline:page.wait_for_timeout(50)
+            page.locator('#stop').click();page.wait_for_timeout(100)
+            stats=page.evaluate('window.canvasStats')
+            self.assertEqual(stats,{'created':1,'contexts':1,'sizes':[['width',640],['height',360]]})
+            raw=__import__('base64').b64decode(harness.payload()['image'])
+            page.locator('#upload').set_input_files({'name':'fixture.png','mimeType':'image/png','buffer':raw})
+            page.locator('#analyze').click()
+            page.wait_for_function("() => document.querySelector('#status').textContent==='Image analyzed'")
+            stats=page.evaluate('window.canvasStats')
+            self.assertEqual(stats,{'created':1,'contexts':1,'sizes':[['width',640],['height',360],['width',320],['height',320]]})
+            browser.close()
+
+    def test_telemetry_has_stable_widths_and_decorations_respect_reduced_motion(self):
+        harness=server_tests.HTTPTests()
+        with harness.running(transport=lambda req: {'answers': {}}), sync_playwright() as pw:
+            browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+            page=browser.new_page(viewport={'width':1280,'height':900})
+            page.goto(f'http://127.0.0.1:{harness.port}/')
+            metrics=page.evaluate("""() => {
+                const nodes=[...document.querySelectorAll('.telemetry strong')];
+                const measure=()=>nodes.map(n=>{const r=n.getBoundingClientRect();return [r.x,r.y,r.width,r.height];});
+                const before=measure();nodes.forEach(n=>n.textContent='88.8 /s');const after=measure();
+                return {before,after,numeric:nodes.map(n=>getComputedStyle(n).fontVariantNumeric)};
+            }""")
+            self.assertEqual(metrics['before'],metrics['after'],'Numeric content must not resize metrics or move neighbors')
+            self.assertTrue(all('tabular-nums' in value for value in metrics['numeric']))
+            page.emulate_media(reduced_motion='reduce')
+            page.locator('#badge').evaluate("n=>n.className='state-badge busy'")
+            self.assertEqual(page.locator('#badge i').evaluate('n=>getComputedStyle(n).animationName'),'none')
+            page.set_viewport_size({'width':390,'height':844})
+            self.assertTrue(page.evaluate('document.documentElement.scrollWidth <= innerWidth'))
+            browser.close()
+
     def test_target_rate_uses_capture_start_interval_with_serial_requests(self):
         import time
         for latency in (.06, .40):
@@ -130,7 +272,7 @@ class BrowserTests(unittest.TestCase):
             browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream'])
             page=browser.new_page(permissions=['camera']);page.goto(f'http://127.0.0.1:{harness.port}/')
             page.locator('#key').fill('fixture-secret');page.locator('#start').click()
-            page.wait_for_function("() => document.querySelector('#status').textContent === 'Asking Jev…'")
+            page.wait_for_function("() => document.querySelector('#results').getAttribute('aria-busy') === 'true'")
             self.assertTrue(entered.wait(2))
             page.locator('#stop').click();page.locator('#start').click()
             page.wait_for_function("() => document.querySelector('video').srcObject !== null")
@@ -176,7 +318,7 @@ class BrowserTests(unittest.TestCase):
             browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream'])
             page=browser.new_page(permissions=['camera']); page.goto(f'http://127.0.0.1:{harness.port}/')
             page.locator('#key').fill('fixture-secret');page.locator('#labels').fill('mug');page.locator('#start').click()
-            page.wait_for_function("() => document.querySelector('#status').textContent === 'Asking Jev…'")
+            page.wait_for_function("() => document.querySelector('#results').getAttribute('aria-busy') === 'true'")
             self.assertTrue(entered.wait(2))
             page.locator('#stop').click();page.locator('#start').click()
             page.locator('#labels').fill('person')
