@@ -1,10 +1,10 @@
 # Jev Live
 
-A dependency-free Python HTTP gateway and vanilla browser dashboard for **snapshot-based camera object localization** with Jev 1.14.0. No simulated detections are shipped in the app. Test fixture answers exist only under `tests/`.
+A dependency-free Python HTTP gateway and vanilla browser dashboard combining **Jev recognition with browser-local pixel tracking**. Jev 1.14.0 localizes requested targets; a dedicated OpenCV worker follows measured movement between responses. No simulated detections are shipped in the app. Test fixtures exist only under `tests/`.
 
 ## Run
 
-Requires Python 3.10+ and a current browser. Runtime has no pip/npm dependencies.
+Requires Python 3.10+ and a current browser. The gateway has no pip/npm runtime dependencies. A pinned, same-origin OpenCV 4.13.0 browser runtime is included with its license and provenance; it loads only after Start camera.
 
 ```sh
 git clone https://github.com/mu1ze/jev-live.git
@@ -56,16 +56,24 @@ All POSTs require an exact matching `Origin`; no CORS is enabled. Direct local H
 ## Behavior and billing
 
 - Smooth native video preview runs independently of requests. Detection does **not** run at video frame rate.
-- Live status and stage copy stay stable across requests. Detection elements are reused by target label, telemetry uses stable-width tabular numbers, and snapshots reuse one canvas/context. Only changed text and styles are written. Boxes jump directly to the latest measured coordinates, without animated interpolation or fabricated tracking; absent, filtered, stopped, or expired detections disappear immediately.
-- An eight-result deterministic Chromium fixture benchmark reduced box additions/removals from 8/7 to 1/0 and status/stage-note mutations from 19/18 to 2/2 (startup only). These measurements describe UI work, not real-model accuracy or camera FPS.
+- Camera boxes use unique track IDs and measured pixel motion, not coordinate interpolation. Local sampling targets roughly 15 Hz independently of serial Jev requests, with one worker frame in flight and no unbounded queue. Tracked boxes survive weak/missing Jev results only while current visual evidence supports them. Snapshot-only fallback is explicitly labeled if tracking cannot initialize; still-image analysis remains snapshot-only.
+- Changed-only DOM updates, stable-width telemetry and one reusable capture canvas remain. The earlier eight-result snapshot-rendering benchmark (8/7 box additions/removals reduced to 1/0) describes the snapshot architecture, not a performance or accuracy claim for tracking.
 - Default target: **4 Hz** (250 ms capture-to-capture minimum). Choices: Auto (continuous serial), 4 Hz, 2 Hz, 1 Hz, or economy 0.2 Hz. A request slower than the target interval is followed immediately by the next; there is no extra fixed pause. One browser request remains in flight at a time. Actual completed detections/sec is measured separately from the selected target; latency, target count and provider limits may lower it. API/network errors trigger exponential retry backoff starting at 3 seconds (maximum 30 seconds). Hidden tabs pause new snapshots and resume when visible.
 - Up to eight targets means up to sixteen questions per request: one `noul` presence question and one `box` question per target. More targets, larger images and faster cadence cost more. Multiple browser tabs can issue independent requests.
 - Snapshots are JPEG at quality 0.82, normally downscaled to a maximum 640-pixel edge. Small images are enlarged to the documented 280-pixel minimum side, without changing aspect ratio; extreme aspect ratios that cannot fit the 1568-pixel maximum are rejected.
 - A single Box question always returns a box, even for an absent object. The gateway suppresses boxes with presence below **0.70**, malformed answer types, non-finite values, invalid confidence or coordinates outside `[0,1]`, and inverted/zero-area edges.
-- Effective confidence is **min(presence, box confidence)**. The slider filters from 70% to 100% without another request.
-- Boxes use `object-fit: contain` letterbox-aware geometry, have target labels, and **expire 4 seconds after frame capture**, not after response arrival. A response arriving after expiry is discarded. No interpolation, extrapolation, smoothing, identity tracking or fabricated video tracking is performed.
-- Stop/restart, target edits, key edits, file changes and errors invalidate or clear boxes. Epoch IDs prevent late responses from reviving stale overlays. Editing targets while camera permission is pending cancels that pending start.
+- Recognition confidence is **min(presence, box confidence)**. The 70–100% slider gates new tracking seeds and snapshot display. An already supported visual track can remain through weaker recognition; its caption shows the last accepted recognition confidence, not an invented tracking probability.
+- All boxes use `object-fit: contain` letterbox-aware geometry. Semantic responses and snapshot-only boxes expire **4 seconds after capture**. Tracking seeds initialize at the captured pixels and replay retained frames to the present; expired/unavailable captures are rejected instead of pasted onto the current video. Live visual tracks require semantic revalidation within **10 seconds**, lose immediately when pixel evidence fails, and clear on frame gaps over 200 ms or watchdog stalls. No velocity extrapolation or cosmetic box animation is used.
+- Stop/restart, target edits, key edits, file changes, hidden tabs and worker errors clear/invalidate tracks. Epoch IDs prevent late responses from reviving stale overlays. Transient Jev request errors may preserve a currently supported visual track only until bounded semantic expiry. Editing targets while camera permission is pending cancels that pending start.
 - Stop prevents new requests, but **cannot revoke a frame already sent or cancel billing for a request already being processed**. A pending request is allowed to settle before another is sent, including across restart.
+
+## Tracking runtime and security
+
+OpenCV assets are pinned under `static/trackingvendor/`; licenses, source URLs and SHA-256 hashes are included. The official single-file runtime is approximately 11 MB uncompressed and may take a few seconds to initialize. There is no runtime CDN dependency. Frames stay in bounded browser/worker memory except for the existing explicitly requested Jev snapshots; no tracker frames are uploaded.
+
+The main document retains `script-src 'self'` without `unsafe-eval`. Only the exact authenticated `tracking-worker.js` response receives a separate worker policy allowing the runtime's required JavaScript/WebAssembly compilation. That worker has `connect-src 'none'` and cannot create child workers. Real Chromium tests verify that worker fetch is blocked while the runtime initializes and main-page evaluation remains blocked. The source/compiled classic tracker pair is generated by `python3 build_tracker.py`; regenerate after editing `static/tracker.mjs` and commit the paired provenance manifest.
+
+Tests additionally exercise opposing moving pixel textures in the real app with a mocked Jev transport, retained IDs through weak recognition, loss/removal, delayed capture replay, revalidation expiry, hidden/source/target/stop resets and worker/camera stalls. These are synthetic pixel tests—not proof of real camera accuracy. Legacy snapshot-only browser regressions deliberately block the worker to verify the fallback independently.
 
 ## API and limits
 
@@ -113,6 +121,6 @@ Implementation followed test-first RED→GREEN vertical slices; see `TDD.md` for
 
 The deployed private HTTPS route has been verified with a real key loaded from `.env.local` and an empty browser key field. Three real cat-photo requests completed in 95–120 ms. A bounded browser run feeding the same public photo through a substituted camera stream completed nine real API requests with one request in flight, a 253 ms mean start interval (3.95 starts/sec), and a displayed 4.0 completed detections/sec. These are observed results for one public image and one target, not a guarantee for your camera or multiple targets. Machine-readable results: `artifacts/live-verification.json` and `artifacts/live-rate-verification.json`. `artifacts/real-jev-rate-test.png` shows real model results on that explicitly labeled test stream, not your camera.
 
-Your real device's camera permission and camera accuracy still require checking from your browser. Images/Box are explicitly experimental in TypeSafe documentation; accuracy and response formats may change. Only one object instance per target can be localized, not arbitrary instance arrays. Not suitable for safety-critical decisions. A slow inference can legitimately yield no visible boxes because freshness expired.
+Your real device's camera permission and camera accuracy still require checking from your browser. Images/Box are explicitly experimental in TypeSafe documentation; accuracy and response formats may change. **Only one object instance per requested target can be discovered**, not arbitrary duplicate-instance arrays. This is short-term sparse optical flow, not general re-identification: tiny/textureless items, hand occlusion, rotation, blur, articulated movement and crossing objects can lose tracking. New semantic detections are needed for reacquisition. No successful camera test of actual chapstick/lighters/wallets is claimed. A slow inference may expire before it can seed a track. Not suitable for safety-critical decisions.
 
 Source contract: [Images](https://docs.typesafe.ai/images), [Box](https://docs.typesafe.ai/go/box), [Noul](https://docs.typesafe.ai/go/noul).
