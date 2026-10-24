@@ -109,7 +109,9 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
         def end_headers(self):
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Referrer-Policy', 'no-referrer')
-            self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            worker = urlsplit(self.path).path == prefix + '/tracking-worker.js'
+            policy = "default-src 'none'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'" if worker else "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+            self.send_header('Content-Security-Policy', policy)
             self.send_header('Permissions-Policy', 'camera=(self), microphone=()')
             super().end_headers()
 
@@ -162,6 +164,10 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                 self.end_headers()
                 return
             static_routes = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript'), '/core.mjs': ('core.mjs', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
+            for name in ('tracking-worker.js', 'tracker-classic.js', 'tracking-client.mjs'):
+                static_routes['/' + name] = (name, 'text/javascript')
+            for name in ('opencv.js', 'LICENSE.opencv', 'COPYRIGHT.opencv', 'asset-manifest.json'):
+                static_routes['/trackingvendor/' + name] = ('trackingvendor/' + name, 'text/javascript' if name.endswith('.js') else 'text/plain')
             route = parsed.path[len(prefix):] if parsed.path.startswith(prefix + '/') else None
             if route in static_routes:
                 from pathlib import Path
