@@ -173,7 +173,7 @@ class BrowserTests(unittest.TestCase):
                     page=browser.new_page(permissions=['camera'])
                     page.goto(f'http://127.0.0.1:{harness.port}/')
                     self.assertEqual(page.locator('#cadence').input_value(),'250')
-                    self.assertEqual(page.locator('#cadence option').evaluate_all('(items)=>items.map(x=>x.value)'),['0','10','250','500','1000','5000'])
+                    self.assertEqual(page.locator('#cadence option').evaluate_all('(items)=>items.map(x=>x.value)'),['0','250','500','1000','5000'])
                     page.locator('#key').fill('fixture-secret');page.locator('#start').click()
                     deadline=time.monotonic()+5
                     while len(starts)<5 and time.monotonic()<deadline: page.wait_for_timeout(50)
