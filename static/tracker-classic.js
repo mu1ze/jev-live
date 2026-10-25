@@ -2,7 +2,7 @@
 // Pixel-only sparse LK tracker. No fixture/ground-truth dependency.
 const median = a => { const b = [...a].sort((x,y)=>x-y); return b.length ? b[Math.floor(b.length/2)] : 0; };
 class PixelTracker {
-  constructor(cv, width, height, {bufferSize=16, maxGapMs=200, maxTracks=8, maxTrackAgeMs=10000}={}) {
+  constructor(cv, width, height, {bufferSize=16, maxGapMs=200, maxTracks=24, maxTrackAgeMs=10000}={}) {
     Object.assign(this,{cv,width,height,bufferSize,maxGapMs,maxTracks,maxTrackAgeMs});
     this.frames=[]; this.tracks=new Map(); this.events=[]; this.serial=0;
   }

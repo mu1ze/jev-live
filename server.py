@@ -235,7 +235,7 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                 if not isinstance(key, str) or not re.fullmatch(r'[\x21-\x7e]{1,512}', key):
                     raise ValueError()
                 labels = body.get('labels')
-                if not isinstance(labels, list) or not 1 <= len(labels) <= 8:
+                if not isinstance(labels, list) or not 1 <= len(labels) <= 24:
                     raise ValueError()
                 if any(not isinstance(label, str) or not re.fullmatch(r"[\w][\w .,'()/-]{0,79}", label) for label in labels) or len(set(labels)) != len(labels):
                     raise ValueError()
