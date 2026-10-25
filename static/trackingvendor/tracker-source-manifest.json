@@ -1,7 +1,7 @@
 {
   "source": "../tracker.mjs",
-  "sourceSha256": "1525a01f7426dbaee06d6bdab28239db0f727bd812521ad42b1701bcd7318e30",
+  "sourceSha256": "4091575ac138645e556fbe3cb47e7b888b2c2ddb0a723473b90df0952812764e",
   "generated": "../tracker-classic.js",
-  "generatedSha256": "29fb6fe25b838bea9ca9da2bea6778f60a691233221f7d0ea3d7ad0cdb9019ff",
+  "generatedSha256": "2f011cb272007901174a943de6359308746d28acfba30cf5d465740b2e4fc4a4",
   "adaptation": "Remove only two ESM export declarations; prepend generated header."
 }

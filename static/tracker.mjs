@@ -1,13 +1,16 @@
 // Pixel-only sparse LK tracker. No fixture/ground-truth dependency.
 export const median = a => { const b = [...a].sort((x,y)=>x-y); return b.length ? b[Math.floor(b.length/2)] : 0; };
 export class PixelTracker {
-  constructor(cv, width, height, {bufferSize=16, maxGapMs=200, maxTracks=24, maxTrackAgeMs=10000}={}) {
-    Object.assign(this,{cv,width,height,bufferSize,maxGapMs,maxTracks,maxTrackAgeMs});
+  constructor(cv, width, height, {bufferSize=128, maxHistoryBytes=48*1024*1024, maxGapMs=200, maxTracks=24, maxTrackAgeMs=10000}={}) {
+    Object.assign(this,{cv,width,height,maxGapMs,maxTracks,maxTrackAgeMs});
+    this.bufferSize=Math.max(1,Math.min(128,bufferSize));
+    this.maxHistoryBytes=Math.max(0,Math.min(48*1024*1024,maxHistoryBytes));
+    this.budgetEvicted=-1;this.rejects={};this.losses={};
     this.frames=[]; this.tracks=new Map(); this.events=[]; this.serial=0;
   }
   dispose() { for(const f of this.frames) f.gray.delete(); this.frames=[]; this.tracks.clear(); }
   snapshot() { return [...this.tracks.values()].map(t=>({id:t.id,label:t.label,box:[t.box[0]/this.width,t.box[1]/this.height,t.box[2]/this.width,t.box[3]/this.height],points:t.points.length,confidence:t.confidence})); }
-  lose(t,reason,frameId) { this.tracks.delete(t.id); this.events.push({id:t.id,reason,frameId}); if(this.events.length>128) this.events.splice(0,this.events.length-128); }
+  lose(t,reason,frameId) { this.losses[reason]=Math.min(1e9,(this.losses[reason]||0)+1);this.tracks.delete(t.id); this.events.push({id:t.id,reason,frameId}); if(this.events.length>128) this.events.splice(0,this.events.length-128); }
   push(imageData, frameId, timestampMs) {
     const cv=this.cv, rgba=cv.matFromImageData(imageData), gray=new cv.Mat();
     cv.cvtColor(rgba,gray,cv.COLOR_RGBA2GRAY); rgba.delete();
@@ -15,14 +18,20 @@ export class PixelTracker {
     if(prev && (timestampMs<=prev.timestampMs || frameId<=prev.frameId)) { gray.delete(); throw Error('Frames must be monotonic'); }
     if(prev && timestampMs-prev.timestampMs>this.maxGapMs) for(const t of [...this.tracks.values()]) this.lose(t,'frame-gap',frameId);
     if(prev) this.advance(prev,next,[...this.tracks.values()]);
-    this.frames.push(next); while(this.frames.length>this.bufferSize) this.frames.shift().gray.delete();
+    this.frames.push(next);
+    while(this.frames.length && (timestampMs-this.frames[0].timestampMs>=4000 || this.frames.length>this.bufferSize || this.frames.length*this.width*this.height>this.maxHistoryBytes)) {
+      const expired=timestampMs-this.frames[0].timestampMs>=4000;
+      const old=this.frames.shift();if(!expired)this.budgetEvicted=old.frameId;old.gray.delete();
+    }
     next.tracks=this.snapshot();
     return next.tracks;
   }
   // normalized [x,y,width,height], stamped at *capture* frame; replay pixel evidence to latest frame.
+  diagnostics() { return {historyFrames:this.frames.length,historyBytes:this.frames.length*this.width*this.height,historyMs:this.frames.length?this.frames.at(-1).timestampMs-this.frames[0].timestampMs:0,rejects:{...this.rejects},losses:{...this.losses}}; }
+  counted(result) { for(const {reason} of result.rejected)this.rejects[reason]=Math.min(1e9,(this.rejects[reason]||0)+1);return result; }
   seed(frameId, detections) {
     const capture=this.frames.find(f=>f.frameId===frameId);
-    if(!capture) return {accepted:[],rejected:detections.map(d=>({label:d.label,reason:'capture-frame-expired'}))};
+    if(!capture) return this.counted({accepted:[],rejected:detections.map(d=>({label:d.label,reason:frameId<=this.budgetEvicted?'capture-history-budget':'capture-frame-expired'})),replayMs:0});
     const trial=new PixelTracker(this.cv,this.width,this.height,{maxTracks:this.maxTracks,maxGapMs:this.maxGapMs,maxTrackAgeMs:this.maxTrackAgeMs});
     trial.frames=this.frames; trial.serial=this.serial;
     const result=trial.seedRaw(frameId,detections);this.serial=trial.serial;
@@ -44,7 +53,7 @@ export class PixelTracker {
       if(!past) (capture.tracks ||= []).push({id:t.id,label:t.label,box:d.box});
     }
     this.frames.at(-1).tracks=this.snapshot();
-    return {...result,accepted};
+    return this.counted({...result,accepted});
   }
   seedRaw(frameId, detections) {
     const i=this.frames.findIndex(f=>f.frameId===frameId);
@@ -74,8 +83,15 @@ export class PixelTracker {
       const prev=this.frames[k-1], next=this.frames[k];
       if(next.timestampMs-prev.timestampMs>this.maxGapMs) for(const t of fresh.filter(t=>this.tracks.has(t.id))) this.lose(t,'replay-gap',next.frameId);
       this.advance(prev,next,fresh.filter(t=>this.tracks.has(t.id)));
+      // Never publish an intermediate replay position as present-time evidence.
+      // CPU budget is checked between indivisible OpenCV transitions.
+      if(performance.now()-start>=2000) {
+        for(const t of fresh.filter(t=>this.tracks.has(t.id)))this.lose(t,'replay-budget',next.frameId);
+        break;
+      }
     }
-    return {accepted,rejected,replayMs:performance.now()-start};
+    for(const t of fresh)if(!this.tracks.has(t.id))rejected.push({label:t.label,reason:this.events.findLast(e=>e.id===t.id)?.reason||'pixel-evidence-lost'});
+    return {accepted:accepted.filter(id=>this.tracks.has(id)),rejected,replayMs:performance.now()-start};
   }
   advance(prev,next,tracks) {
     tracks=tracks.filter(t=>{

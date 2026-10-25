@@ -59,7 +59,7 @@ class CameraStartTests(unittest.TestCase):
                         self.assertGreaterEqual(len(calls), 4, 'Optional frame counters cannot gate recognition')
                         pixels = page.evaluate('window.pixelFrames')
                         self.assertGreaterEqual(len(pixels), 5)
-                        self.assertTrue(all(b['time']-a['time'] >= 65 for a, b in zip(pixels, pixels[1:])), pixels)
+                        self.assertTrue(all(b['time']-a['time'] >= 32 for a, b in zip(pixels, pixels[1:])), pixels)
                         self.assertEqual(maximum, 1)
                         page.locator('#stop').click()
                         page.wait_for_timeout(150)

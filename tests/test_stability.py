@@ -1,0 +1,114 @@
+"""Real OpenCV worker, synthetic pixels only. No provider or user footage."""
+import json
+import pathlib
+import unittest
+import test_server
+from playwright.sync_api import sync_playwright
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+class StabilityTests(unittest.TestCase):
+    def run_fixture(self, script):
+        harness = test_server.HTTPTests()
+        with harness.running(), sync_playwright() as pw:
+            browser = pw.chromium.launch(executable_path='/usr/bin/chromium', headless=True, args=['--no-sandbox'])
+            try:
+                page = browser.new_page()
+                page.goto(f'http://127.0.0.1:{harness.port}/')
+                return page.evaluate(script)
+            finally:
+                browser.close()
+
+    def test_app_adaptive_sampling_and_private_layout_stable_diagnostics(self):
+        from test_tracking import CAMERA
+        for slow in (False, True):
+            with self.subTest(slow=slow):
+                harness=test_server.HTTPTests()
+                with harness.running(transport=lambda req:{'answers':{}}),sync_playwright() as pw:
+                    browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+                    try:
+                        page=browser.new_page(viewport={'width':390,'height':844})
+                        page.add_init_script(CAMERA+"window.starts=[];const W=Worker;window.Worker=class extends W{postMessage(m,...args){if(m.type==='frame')starts.push(performance.now());return super.postMessage(m,...args)}};")
+                        if slow:
+                            script=(ROOT/'static/tracking-worker.js').read_text().replace("if(m.type==='frame') {", "if(m.type==='frame') {const until=performance.now()+100;while(performance.now()<until){}")
+                            page.route('**/tracking-worker.js',lambda route:route.fulfill(body=script,content_type='text/javascript'))
+                        page.goto(f'http://127.0.0.1:{harness.port}/')
+                        page.locator('#key').fill('fixture-only');page.locator('#start').click()
+                        page.wait_for_function('() => starts.length>12')
+                        page.evaluate("window.starts=[];window.statusChanges=0;window.observer=new MutationObserver(m=>statusChanges+=m.length);observer.observe(document.querySelector('#status'),{childList:true,subtree:true,characterData:true})")
+                        page.wait_for_timeout(2600)
+                        metrics=page.evaluate("() => ({hz:(starts.length-1)*1000/(starts.at(-1)-starts[0]),n:starts.length,statusChanges,overflow:document.documentElement.scrollWidth>innerWidth})")
+                        self.assertGreater(metrics['hz'],24 if not slow else 5)
+                        self.assertLess(metrics['hz'],31 if not slow else 10)
+                        self.assertEqual(metrics['statusChanges'],0);self.assertFalse(metrics['overflow'])
+                        page.locator('#tracking-details').click()
+                        page.wait_for_function("() => document.querySelector('#tracking-diagnostics').textContent.includes('complete')")
+                        details=page.locator('#tracking-diagnostics').inner_text()
+                        self.assertIn('sample',details);self.assertIn('complete',details)
+                        self.assertNotIn('fixture-only',details);self.assertNotIn('coffee mug',details)
+                        self.assertFalse(page.evaluate('() => document.documentElement.scrollWidth>innerWidth'))
+                        print('Adaptive app fixture:', {'slow100ms':slow, **metrics, 'details':details},flush=True)
+                        page.locator('#stop').click();page.wait_for_timeout(150)
+                    finally:
+                        browser.close()
+
+    def test_pixel_stress_coverage_and_fresh_semantic_reacquisition(self):
+        result=self.run_fixture((ROOT/'tests/tracking-sequences.js').read_text())
+        (ROOT/'artifacts').mkdir(exist_ok=True)
+        (ROOT/'artifacts/stability-sequences.json').write_text(json.dumps(result,indent=2))
+        print('Synthetic stress coverage:',json.dumps(result),flush=True)
+        for mode,metrics in result.items():
+            self.assertEqual(metrics['initial'],2 if mode=='crossing' else 1)
+            self.assertGreaterEqual(metrics['coverage'],0)
+            self.assertLessEqual(metrics['coverage'],1)
+            if mode!='removed':self.assertEqual(metrics['refreshTracks'],2 if mode=='crossing' else 1)
+        for mode in ('blur','partial'):
+            self.assertEqual(result[mode]['firstLossMs'],600)
+            self.assertEqual(result[mode]['lossFrames'],29)
+        self.assertGreaterEqual(result['fast']['coverage'],.95)
+        self.assertEqual(result['crossing']['identityChanges'],0)
+        self.assertEqual(result['crossing']['eligible'],80,'coverage must include both targets on all 40 frames')
+        removed=result['removed']
+        self.assertEqual(removed['phantomFrames'],0)
+        self.assertEqual(removed['staleTracks'],0,'old capture must never resurrect a lost object')
+        self.assertEqual(removed['freshTracks'],1,'fresh semantic capture must allow evidence-backed reacquisition')
+        self.assertTrue(removed['newIdentity'],'full disappearance is not re-identification')
+        self.assertEqual(removed['reacquisitionMs'],200)
+        self.assertGreater(removed['diagnostics']['losses'].get('pixel-evidence-lost',0),0)
+        self.assertTrue(removed['staleRejects'],'replay loss must have an explicit rejection reason')
+
+    def test_replay_cpu_budget_with_24_targets_keeps_worker_responsive(self):
+        result=self.run_fixture((ROOT/'tests/tracking-replay-load.js').read_text())
+        (ROOT/'artifacts').mkdir(exist_ok=True)
+        (ROOT/'artifacts/stability-replay-load.json').write_text(json.dumps(result,indent=2))
+        print('24-target replay load:',json.dumps(result),flush=True)
+        self.assertLess(result['delayed']['processingMs'],3000)
+        # Depending on hardware, replay either finishes safely or rejects atomically.
+        rejected=result['delayed']['diagnostics']['rejects'].get('replay-budget',0)
+        self.assertTrue(rejected==24 or len(result['delayed']['tracks'])==24)
+        self.assertEqual(result['freshTracks'],24)
+        self.assertEqual(result['continued'],24)
+
+    def test_delayed_capture_replays_beyond_16_frames_and_reports_expiry(self):
+        result = self.run_fixture("""async () => {
+            const w=new Worker('tracking-worker.js');
+            await new Promise(r=>w.onmessage=e=>{if(e.data.type==='ready')r()});
+            const command=m=>new Promise(resolve=>{w.onmessage=e=>resolve(e.data);w.postMessage(m)});
+            const c=document.createElement('canvas');c.width=320;c.height=320;const ctx=c.getContext('2d');
+            const tile=document.createElement('canvas');tile.width=80;tile.height=80;const tx=tile.getContext('2d');let s=42;
+            for(let y=0;y<80;y+=2)for(let x=0;x<80;x+=2){s=(s*1664525+1013904223)>>>0;tx.fillStyle=`rgb(${s&255},${s>>>8&255},${s>>>16&255})`;tx.fillRect(x,y,2,2)}
+            const frame=async id=>{ctx.fillStyle='#222';ctx.fillRect(0,0,320,320);ctx.drawImage(tile,40+id*.5,100);return command({type:'frame',generation:1,frameId:id,timestamp:id*100/3,width:320,height:320,pixels:ctx.getImageData(0,0,320,320).data.buffer})};
+            const seed=()=>command({type:'seed',generation:1,frameId:0,detections:[{label:'fixture',confidence:.9,box:[40/320,100/320,.25,.25]}]});
+            try {
+                await frame(0);for(let i=1;i<=45;i++)await frame(i);const at1500=await seed();
+                for(let i=46;i<=75;i++)await frame(i);const at2500=await seed();
+                for(let i=76;i<=121;i++)await frame(i);const expired=await seed();
+                return {at1500,at2500,expired};
+            } finally {w.terminate()}
+        }""")
+        self.assertEqual(len(result['at1500']['tracks']), 1)
+        self.assertEqual(len(result['at2500']['tracks']), 1)
+        self.assertEqual(len(result['at2500'].get('seedResult', {}).get('accepted', [])), 1, '2.5s capture must replay, not merely leave an earlier track alive')
+        self.assertAlmostEqual(result['at2500']['tracks'][0]['box'][0], 77.5/320, delta=.005)
+        self.assertEqual(result['expired']['diagnostics']['rejects']['capture-frame-expired'], 1)
+        self.assertLessEqual(result['at2500']['diagnostics']['historyBytes'], 48*1024*1024)
+        print('Delayed-seed real-worker:', json.dumps({k: {'tracks': len(v['tracks']), 'diagnostics': v['diagnostics']} for k,v in result.items()}), flush=True)

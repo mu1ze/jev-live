@@ -18,7 +18,7 @@ function watchVideo() {
   if(typeof video.requestVideoFrameCallback!=='function')return;
   const next=()=>{
     if(!running||source!==stream)return;
-    presentedFrame++;
+    presentedFrame++;sample();
     videoCallback=video.requestVideoFrameCallback(next);
   };
   videoCallback=video.requestVideoFrameCallback(next);
@@ -38,7 +38,7 @@ function trackingFrame(now) {
   if(!tracking.ready)return null;
   const mediaFrame=videoFrame(now);
   if(mediaFrame!==null&&mediaFrame===lastVideoFrame)return now-lastSample<80?lastTrackingCapture:null;
-  if(mediaFrame===null||tracking.busy||now-lastSample<65)return null;
+  if(mediaFrame===null||tracking.busy||now-lastSample+1<tracking.sampleInterval())return null;
   const capture=tracking.push(snapshotCanvas,snapshotContext,now);
   if(capture){lastSample=now;lastVideoFrame=mediaFrame;lastTrackingCapture=capture;}
   return capture;
@@ -90,7 +90,7 @@ function drawSnapshot(source,w,h) {
 function sample() {
   if(!running||document.hidden||!tracking.ready||tracking.busy||video.readyState<2)return;
   const now=performance.now();
-  if(now-lastSample<65)return;
+  if(now-lastSample+1<tracking.sampleInterval())return;
   try {drawSnapshot(video,video.videoWidth,video.videoHeight);trackingFrame(now);}
   catch {tracking.failure();}
 }
@@ -200,6 +200,10 @@ function render() {
   const items=running&&document.hidden?[]:tracks.length||running&&tracking.engaged&&tracking.ready?tracks:frame.visible(now,Number($('confidence').value));
   if(running&&!document.hidden)liveStatus();
   text('rate',`${rate.value(now).toFixed(1)} /s`);
+  if($('tracking-details').parentElement.open) {
+    const d=tracking.diagnostics(now), counts=c=>Object.entries(c).map(([k,v])=>`${k}: ${v}`).join(', ')||'none';
+    text('tracking-diagnostics',`Local only · rolling 5s · since source reset\nsample ${d.sampleHz.toFixed(1)} Hz · complete ${d.completionHz.toFixed(1)} Hz\nworker ${d.processingMs.toFixed(1)} ms · replay ${d.replayMs.toFixed(1)} ms\ncadence ${d.intervalMs.toFixed(0)} ms · history ${(d.historyMs/1000).toFixed(2)} s / ${d.historyFrames} frames / ${(d.historyBytes/1048576).toFixed(1)} MiB\nseed rejects: ${counts(d.rejects)}\ntrack losses: ${counts(d.losses)}`);
+  }
   const visible=new Set(items.map(d=>d.id||d.label));
   for(const [label,node] of boxNodes) {
     if(!visible.has(label)) {node.remove();boxNodes.delete(label);}
@@ -229,6 +233,7 @@ function render() {
     if(age>=frame.ttl && !pending && !running) text('stage-note','BOXES EXPIRED · NO TRACKING');
   }
 }
+$('tracking-details').parentElement.addEventListener('toggle',()=>render());
 $('start').addEventListener('click',start);
 $('stop').addEventListener('click',stop);
 $('upload').addEventListener('change',upload);
