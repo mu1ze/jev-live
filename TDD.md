@@ -1,5 +1,16 @@
 # Observed test-first checkpoints
 
+## Native camera startup independence regression
+
+`tests/test_camera_start.py` uses Chromium's native fake camera (`--use-fake-device-for-media-stream`), not a substituted photo or canvas stream. All recognition responses are fixture data.
+
+- RED: with the actual worker's cold initialization delayed 2 seconds, native preview played but there were **zero recognition requests** during the first 600 ms. Removing the worker-readiness inference gate made that regression GREEN.
+- RED: missing/throwing `getVideoPlaybackQuality` generated uncaught browser errors; a frozen-zero counter submitted only one tracking frame. Presented-frame callbacks plus bounded legacy sampling made these GREEN.
+- GREEN coverage includes missing/throwing/frozen counters with and without `requestVideoFrameCallback`, frozen-positive legacy counters, Auto serial requests, at least 65 ms between pixel submissions, real worker startup after loading, measured tracking, matching capture/generation seeds, and stop/restart while a worker is still cold.
+- Existing regressions were synchronized to the new independent lifecycle: early semantic requests may precede the worker; weak semantics begin only after actual pixel tracks exist. Worker failure removes tracked boxes but preserves independent snapshot results until their capture-time TTL, rather than invalidating a pending semantic response.
+- No speculative `video.play()` timeout was added: these browser reproductions reached playing video. They demonstrate failure mechanisms, not the user's unconfirmed device cause.
+
+
 Each tracer bullet was run RED before its implementation, then re-run GREEN. These are short summaries of tool-observed failures, not invented test output. Final complete output is captured in `artifacts/test-output.txt`.
 
 | Vertical slice | Observed RED checkpoint | GREEN outcome |
