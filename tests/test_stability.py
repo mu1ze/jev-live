@@ -51,6 +51,43 @@ class StabilityTests(unittest.TestCase):
                     finally:
                         browser.close()
 
+    def test_pixel_stress_coverage_and_fresh_semantic_reacquisition(self):
+        result=self.run_fixture((ROOT/'tests/tracking-sequences.js').read_text())
+        (ROOT/'artifacts').mkdir(exist_ok=True)
+        (ROOT/'artifacts/stability-sequences.json').write_text(json.dumps(result,indent=2))
+        print('Synthetic stress coverage:',json.dumps(result),flush=True)
+        for mode,metrics in result.items():
+            self.assertEqual(metrics['initial'],2 if mode=='crossing' else 1)
+            self.assertGreaterEqual(metrics['coverage'],0)
+            self.assertLessEqual(metrics['coverage'],1)
+            if mode!='removed':self.assertEqual(metrics['refreshTracks'],2 if mode=='crossing' else 1)
+        for mode in ('blur','partial'):
+            self.assertEqual(result[mode]['firstLossMs'],600)
+            self.assertEqual(result[mode]['lossFrames'],29)
+        self.assertGreaterEqual(result['fast']['coverage'],.95)
+        self.assertEqual(result['crossing']['identityChanges'],0)
+        self.assertEqual(result['crossing']['eligible'],80,'coverage must include both targets on all 40 frames')
+        removed=result['removed']
+        self.assertEqual(removed['phantomFrames'],0)
+        self.assertEqual(removed['staleTracks'],0,'old capture must never resurrect a lost object')
+        self.assertEqual(removed['freshTracks'],1,'fresh semantic capture must allow evidence-backed reacquisition')
+        self.assertTrue(removed['newIdentity'],'full disappearance is not re-identification')
+        self.assertEqual(removed['reacquisitionMs'],200)
+        self.assertGreater(removed['diagnostics']['losses'].get('pixel-evidence-lost',0),0)
+        self.assertTrue(removed['staleRejects'],'replay loss must have an explicit rejection reason')
+
+    def test_replay_cpu_budget_with_24_targets_keeps_worker_responsive(self):
+        result=self.run_fixture((ROOT/'tests/tracking-replay-load.js').read_text())
+        (ROOT/'artifacts').mkdir(exist_ok=True)
+        (ROOT/'artifacts/stability-replay-load.json').write_text(json.dumps(result,indent=2))
+        print('24-target replay load:',json.dumps(result),flush=True)
+        self.assertLess(result['delayed']['processingMs'],3000)
+        # Depending on hardware, replay either finishes safely or rejects atomically.
+        rejected=result['delayed']['diagnostics']['rejects'].get('replay-budget',0)
+        self.assertTrue(rejected==24 or len(result['delayed']['tracks'])==24)
+        self.assertEqual(result['freshTracks'],24)
+        self.assertEqual(result['continued'],24)
+
     def test_delayed_capture_replays_beyond_16_frames_and_reports_expiry(self):
         result = self.run_fixture("""async () => {
             const w=new Worker('tracking-worker.js');

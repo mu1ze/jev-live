@@ -4,6 +4,19 @@ import {PixelTracker} from '../static/tracker.mjs';
 // Gray allocation seam only; real worker replay is covered in Chromium.
 const cv={Mat:class {delete(){this.deleted=true;}},matFromImageData:()=>({delete(){}}),cvtColor(){},COLOR_RGBA2GRAY:0};
 const push=(t,id,ms)=>t.push({},id,ms);
+test('replay CPU budget atomically rejects unfinished seeds instead of publishing partial motion',context=>{
+  let now=0,calls=0;context.mock.method(performance,'now',()=>now);
+  const flowCv={Mat:class {constructor(){this.rows=6;this.data32F=new Float32Array([50,50,60,50,70,50,50,60,60,60,70,60]);}delete(){} static zeros(){return new this();}},Point:class{},Scalar:class{},rectangle(){},goodFeaturesToTrack(){}};
+  const t=new PixelTracker(flowCv,320,320);
+  t.frames=Array.from({length:76},(_,i)=>({frameId:i,timestampMs:i*100/3,gray:{}}));
+  t.advance=()=>{now+=700;calls++;}; // controlled CPU clock at the optical-flow boundary
+  const result=t.seedRaw(0,[{label:'fixture',box:[.1,.1,.5,.5]}]);
+  assert.equal(result.accepted.length,0);
+  assert.equal(result.rejected[0].reason,'replay-budget');
+  assert.ok(calls<=3,'must stop between transitions, not finish 75 transitions');
+  assert.equal(t.tracks.size,0);
+});
+
 test('loss counters survive bounded event truncation without labels or IDs',()=>{
   const t=new PixelTracker(null,320,320);
   for(let i=0;i<300;i++)t.lose({id:`secret-${i}`},'pixel-evidence-lost',i);

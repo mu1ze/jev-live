@@ -84,8 +84,15 @@ class PixelTracker {
       const prev=this.frames[k-1], next=this.frames[k];
       if(next.timestampMs-prev.timestampMs>this.maxGapMs) for(const t of fresh.filter(t=>this.tracks.has(t.id))) this.lose(t,'replay-gap',next.frameId);
       this.advance(prev,next,fresh.filter(t=>this.tracks.has(t.id)));
+      // Never publish an intermediate replay position as present-time evidence.
+      // CPU budget is checked between indivisible OpenCV transitions.
+      if(performance.now()-start>=2000) {
+        for(const t of fresh.filter(t=>this.tracks.has(t.id)))this.lose(t,'replay-budget',next.frameId);
+        break;
+      }
     }
-    return {accepted,rejected,replayMs:performance.now()-start};
+    for(const t of fresh)if(!this.tracks.has(t.id))rejected.push({label:t.label,reason:this.events.findLast(e=>e.id===t.id)?.reason||'pixel-evidence-lost'});
+    return {accepted:accepted.filter(id=>this.tracks.has(id)),rejected,replayMs:performance.now()-start};
   }
   advance(prev,next,tracks) {
     tracks=tracks.filter(t=>{
