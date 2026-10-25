@@ -26,7 +26,7 @@ function clearError() { $('error').hidden=true; $('error').textContent=''; }
 function credentials() {
   if(!$('key').value.trim() && !serverKey) throw new Error('Enter your TypeSafe API key first. It stays in memory only.');
   const labels=$('labels').value.split(',').map(s=>s.trim()).filter(Boolean);
-  if(!labels.length || labels.length>8 || new Set(labels).size!==labels.length || labels.some(s=>! /^[\p{L}\p{N}_][\p{L}\p{N}_ .,'()/-]{0,79}$/u.test(s))) throw new Error('Choose 1–8 unique targets, up to 80 characters each. Use simple names without backticks.');
+  if(!labels.length || labels.length>24 || new Set(labels).size!==labels.length || labels.some(s=>! /^[\p{L}\p{N}_][\p{L}\p{N}_ .,'()/-]{0,79}$/u.test(s))) throw new Error('Choose 1–24 unique targets, up to 80 characters each. Use simple names without backticks.');
   return {key:$('key').value.trim(),labels};
 }
 function updateButtons() { $('start').disabled=running; $('analyze').disabled=!uploaded || pending || running; }
