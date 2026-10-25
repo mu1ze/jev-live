@@ -45,7 +45,19 @@ function trackingFrame(now) {
 }
 function text(id,value) { if($(id).textContent!==value) $(id).textContent=value; }
 function style(node,key,value) { if(node.style[key]!==value) node.style[key]=value; }
-let failures=0, retryAt=0;
+let failures=0, retryAt=0, speedTrialTimer=null;
+function speedTrial() {
+  clearTimeout(speedTrialTimer);speedTrialTimer=null;
+  const enabled=$('cadence').value==='10';
+  $('speed-trial-note').hidden=!enabled;
+  if(!enabled)return;
+  text('speed-trial-note','100 Hz recognition target · one request at a time. Actual rate is latency-limited. Trial returns to 4 Hz after two minutes of camera use.');
+  if(running&&stream)speedTrialTimer=setTimeout(()=>{
+    speedTrialTimer=null;$('cadence').value='250';
+    text('speed-trial-note','100 Hz trial ended · restored 4 Hz.');
+    if(running&&!pending)schedule();
+  },120000);
+}
 function backoff() { failures=Math.min(failures+1,5); retryAt=performance.now()+Math.min(30000,3000*2**(failures-1)); }
 
 function status(message, kind='') { text('status',message); const name=`state-badge ${kind}`; if($('badge').className!==name) $('badge').className=name; }
@@ -65,6 +77,10 @@ function credentials() {
 }
 function updateButtons() { $('start').disabled=running; $('analyze').disabled=!uploaded || pending || running; }
 function stop() {
+  const trialWasActive=speedTrialTimer!==null;
+  clearTimeout(speedTrialTimer);speedTrialTimer=null;
+  if(trialWasActive&&$('cadence').value==='10')$('cadence').value='250';
+  $('speed-trial-note').hidden=true;
   if(videoCallback!==null)video.cancelVideoFrameCallback?.(videoCallback);
   videoCallback=null;
   running=false; clearInterval(sampleTimer);sampleTimer=null;tracking.close();reset(); $('results').setAttribute('aria-busy','false');
@@ -154,7 +170,8 @@ async function detect(single) {
 }
 async function start() {
   try {credentials();} catch(e) {fail(e.message);return;}
-  stop(); clearError(); running=true; const epoch=frame.epoch;
+  const requestedCadence=$('cadence').value;
+  stop();$('cadence').value=requestedCadence; clearError(); running=true; const epoch=frame.epoch;
   status('Opening camera…','busy'); updateButtons();
   try {
     if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera requires HTTPS or localhost. You can use image upload instead.');
@@ -164,7 +181,7 @@ async function start() {
     await video.play();
     if(epoch!==frame.epoch || !running) return;
     $('source-label').textContent='LIVE CAMERA'; liveStatus();
-    watchVideo();tracking.start();sampleTimer=setInterval(sample,20);
+    watchVideo();tracking.start();sampleTimer=setInterval(sample,20);speedTrial();
     stream.getVideoTracks()[0].addEventListener('ended',()=>{if(running){stop();fail('Camera disconnected. Reconnect and Start again.');}});
     detect(false);
   } catch(e) {
@@ -246,7 +263,8 @@ $('labels').addEventListener('input',()=>{
   if(running){liveStatus();if(!pending)schedule();}
 });
 $('confidence').addEventListener('input',()=>{$('confidence-value').value=`${Math.round(Number($('confidence').value)*100)}%`;render(true);});
-$('cadence').addEventListener('change',()=>{if(running && !pending)schedule();});
+$('cadence').addEventListener('change',()=>{speedTrial();if(running && !pending)schedule();});
+if(new URLSearchParams(location.search).get('experiment')==='100hz'){$('cadence').value='10';speedTrial();}
 document.addEventListener('visibilitychange',()=>{
   clearTimeout(timer); timer=null;
   if(running) {
