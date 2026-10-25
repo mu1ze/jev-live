@@ -17,6 +17,53 @@ draw();setInterval(draw,30);navigator.mediaDevices.getUserMedia=async()=>c.captu
 """
 
 class TrackingTests(unittest.TestCase):
+    def test_delayed_real_worker_hides_stale_tracks_then_recovers(self):
+        harness=test_server.HTTPTests()
+        with harness.running(),sync_playwright() as pw:
+            browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+            try:
+                page=browser.new_page()
+                # Test transport seam: actual OpenCV worker blocked for 800ms on frame 2.
+                script=(ROOT/'static/tracking-worker.js').read_text().replace(
+                    "if(m.type==='frame') {",
+                    "if(m.type==='frame') {if(m.frameId===2){const end=performance.now()+800;while(performance.now()<end){}}")
+                page.route('**/tracking-worker.js',lambda route:route.fulfill(body=script,content_type='text/javascript'))
+                page.goto(f'http://127.0.0.1:{harness.port}/')
+                result=page.evaluate("""async () => {
+                    const {TrackingClient}=await import('/tracking-client.mjs');
+                    const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+                    const c=new TrackingClient(()=>{});c.start();
+                    try {
+                        while(!c.ready)await sleep(10);
+                        const canvas=document.createElement('canvas');canvas.width=320;canvas.height=320;
+                        const ctx=canvas.getContext('2d'),im=ctx.createImageData(320,320);let s=42;
+                        for(let i=0;i<im.data.length;i+=4){s=(s*1664525+1013904223)>>>0;im.data[i]=s&255;im.data[i+1]=s>>>8&255;im.data[i+2]=s>>>16&255;im.data[i+3]=255}ctx.putImageData(im,0,0);
+                        const detection=[{label:'fixture',confidence:.9,box:{left:.2,top:.2,right:.8,bottom:.8}}];
+                        const push=()=>c.push(canvas,ctx,performance.now());
+                        const wait=async()=>{while(c.busy)await sleep(10)};
+                        const first=push();await wait();c.seed(first,detection,0);await sleep(50);
+                        const before=c.current(performance.now()).length;
+                        const started=performance.now();push();await sleep(450);
+                        const during={visible:c.current(performance.now()).length,ready:c.ready,busy:c.busy,extra:push()};
+                        await wait();const elapsed=performance.now()-started;
+                        const fresh=push();await wait();c.seed(fresh,detection,0);await sleep(50);
+                        const recovered={visible:c.current(performance.now()).length,ready:c.ready,busy:c.busy,state:c.state};
+                        const failure=await new Promise(resolve=>{c.worker.onmessage=e=>resolve(e.data);c.worker.postMessage({type:'frame',generation:c.generation,frameId:4,width:0,height:0,pixels:new ArrayBuffer(0)})});
+                        return {before,during,elapsed,recovered,failure};
+                    } finally {c.close()}
+                }""")
+                self.assertEqual(result['before'],1)
+                self.assertEqual(result['during'],dict(visible=0,ready=True,busy=True,extra=None))
+                self.assertGreaterEqual(result['elapsed'],800)
+                self.assertEqual(result['recovered']['visible'],1)
+                self.assertTrue(result['recovered']['ready'])
+                self.assertFalse(result['recovered']['busy'])
+                self.assertEqual(result['failure']['code'],'frame-processing-error')
+                self.assertNotIn('message',result['failure'])
+                print('Controlled real-worker 800ms stall:',result,flush=True)
+            finally:
+                browser.close()
+
     def test_loss_diagnostics_keep_only_latest_128_events(self):
         harness=test_server.HTTPTests()
         with harness.running(),sync_playwright() as pw:
@@ -160,7 +207,9 @@ class TrackingTests(unittest.TestCase):
                     else:page.evaluate("workers[0].dispatchEvent(new ErrorEvent('error'))")
                     page.wait_for_function("() => !document.querySelector('.box')",timeout=1000)
                     page.wait_for_timeout(150);self.assertEqual(page.locator('.box').count(),0)
-                    if action in ('worker-error','worker-stall'):self.assertIn('SNAPSHOT FALLBACK',page.locator('#stage-note').inner_text())
+                    if action in ('worker-error','worker-stall'):
+                        page.wait_for_function("() => document.querySelector('#stage-note').textContent.includes('SNAPSHOT FALLBACK')",timeout=12000)
+                        self.assertIn('WORKER-RUNTIME-ERROR' if action=='worker-error' else 'FRAME-TIMEOUT',page.locator('#stage-note').inner_text())
                     page.locator('#stop').click();page.wait_for_timeout(100);page.close()
             browser.close()
 

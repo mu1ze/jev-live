@@ -16,5 +16,9 @@ onmessage=async ({data:m})=>{
       tracker?.seed(m.frameId,m.detections);
     }
     postMessage({type:m.type,token:m.token,generation:m.generation,frameId:m.frameId,measured:tracker?.frames.at(-1)?.timestampMs,tracks:tracker?.snapshot()||[]});
-  } catch {postMessage({type:'failure'});}
+  } catch(error) {
+    const code=m.type==='seed'?'seed-replay-error':m.type==='reset'?'reset-error':'frame-processing-error';
+    const detail=['Error','TypeError','RangeError','ReferenceError','RuntimeError'].includes(error?.name)?error.name:'unclassified';
+    postMessage({type:'failure',generation:m.generation,code,detail});
+  }
 };
