@@ -18,6 +18,39 @@ class StabilityTests(unittest.TestCase):
             finally:
                 browser.close()
 
+    def test_app_adaptive_sampling_and_private_layout_stable_diagnostics(self):
+        from test_tracking import CAMERA
+        for slow in (False, True):
+            with self.subTest(slow=slow):
+                harness=test_server.HTTPTests()
+                with harness.running(transport=lambda req:{'answers':{}}),sync_playwright() as pw:
+                    browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+                    try:
+                        page=browser.new_page(viewport={'width':390,'height':844})
+                        page.add_init_script(CAMERA+"window.starts=[];const W=Worker;window.Worker=class extends W{postMessage(m,...args){if(m.type==='frame')starts.push(performance.now());return super.postMessage(m,...args)}};")
+                        if slow:
+                            script=(ROOT/'static/tracking-worker.js').read_text().replace("if(m.type==='frame') {", "if(m.type==='frame') {const until=performance.now()+100;while(performance.now()<until){}")
+                            page.route('**/tracking-worker.js',lambda route:route.fulfill(body=script,content_type='text/javascript'))
+                        page.goto(f'http://127.0.0.1:{harness.port}/')
+                        page.locator('#key').fill('fixture-only');page.locator('#start').click()
+                        page.wait_for_function('() => starts.length>12')
+                        page.evaluate("window.starts=[];window.statusChanges=0;window.observer=new MutationObserver(m=>statusChanges+=m.length);observer.observe(document.querySelector('#status'),{childList:true,subtree:true,characterData:true})")
+                        page.wait_for_timeout(2600)
+                        metrics=page.evaluate("() => ({hz:(starts.length-1)*1000/(starts.at(-1)-starts[0]),n:starts.length,statusChanges,overflow:document.documentElement.scrollWidth>innerWidth})")
+                        self.assertGreater(metrics['hz'],24 if not slow else 5)
+                        self.assertLess(metrics['hz'],31 if not slow else 10)
+                        self.assertEqual(metrics['statusChanges'],0);self.assertFalse(metrics['overflow'])
+                        page.locator('#tracking-details').click()
+                        page.wait_for_function("() => document.querySelector('#tracking-diagnostics').textContent.includes('complete')")
+                        details=page.locator('#tracking-diagnostics').inner_text()
+                        self.assertIn('sample',details);self.assertIn('complete',details)
+                        self.assertNotIn('fixture-only',details);self.assertNotIn('coffee mug',details)
+                        self.assertFalse(page.evaluate('() => document.documentElement.scrollWidth>innerWidth'))
+                        print('Adaptive app fixture:', {'slow100ms':slow, **metrics, 'details':details},flush=True)
+                        page.locator('#stop').click();page.wait_for_timeout(150)
+                    finally:
+                        browser.close()
+
     def test_delayed_capture_replays_beyond_16_frames_and_reports_expiry(self):
         result = self.run_fixture("""async () => {
             const w=new Worker('tracking-worker.js');

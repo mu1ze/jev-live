@@ -10,7 +10,7 @@ export class PixelTracker {
   }
   dispose() { for(const f of this.frames) f.gray.delete(); this.frames=[]; this.tracks.clear(); }
   snapshot() { return [...this.tracks.values()].map(t=>({id:t.id,label:t.label,box:[t.box[0]/this.width,t.box[1]/this.height,t.box[2]/this.width,t.box[3]/this.height],points:t.points.length,confidence:t.confidence})); }
-  lose(t,reason,frameId) { this.tracks.delete(t.id); this.events.push({id:t.id,reason,frameId}); if(this.events.length>128) this.events.splice(0,this.events.length-128); }
+  lose(t,reason,frameId) { this.losses[reason]=Math.min(1e9,(this.losses[reason]||0)+1);this.tracks.delete(t.id); this.events.push({id:t.id,reason,frameId}); if(this.events.length>128) this.events.splice(0,this.events.length-128); }
   push(imageData, frameId, timestampMs) {
     const cv=this.cv, rgba=cv.matFromImageData(imageData), gray=new cv.Mat();
     cv.cvtColor(rgba,gray,cv.COLOR_RGBA2GRAY); rgba.delete();

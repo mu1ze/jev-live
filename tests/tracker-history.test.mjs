@@ -4,6 +4,14 @@ import {PixelTracker} from '../static/tracker.mjs';
 // Gray allocation seam only; real worker replay is covered in Chromium.
 const cv={Mat:class {delete(){this.deleted=true;}},matFromImageData:()=>({delete(){}}),cvtColor(){},COLOR_RGBA2GRAY:0};
 const push=(t,id,ms)=>t.push({},id,ms);
+test('loss counters survive bounded event truncation without labels or IDs',()=>{
+  const t=new PixelTracker(null,320,320);
+  for(let i=0;i<300;i++)t.lose({id:`secret-${i}`},'pixel-evidence-lost',i);
+  assert.equal(t.events.length,128);
+  assert.equal(t.diagnostics().losses['pixel-evidence-lost'],300);
+  assert.doesNotMatch(JSON.stringify(t.diagnostics()),/secret/);
+});
+
 test('history retains four seconds at 30 Hz instead of an arbitrary frame count',()=>{
   const t=new PixelTracker(cv,640,360);
   for(let i=0;i<=100;i++)push(t,i,i*100/3);

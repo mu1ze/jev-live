@@ -19,6 +19,30 @@ function harness() {
   return {client,worker:workers[0],changes,advance(ms){now+=ms;for(const [id,t] of timers)if(t.at<=now){timers.delete(id);t.fn();}},now:()=>now,push(){return client.push({width:32,height:32},{getImageData:()=>({data:new Uint8ClampedArray(4096)})},now);}};
 }
 
+test('adaptive cadence uses measured turnaround, recovers headroom, and remains bounded',()=>{
+  const h=harness(),c=h.client,w=h.worker;w.reply({type:'ready'});
+  assert.ok(c.sampleInterval()<40,'fast worker should allow about 30Hz');
+  for(let i=0;i<10;i++){h.push();h.advance(100);w.reply({type:'frame',generation:c.generation,tracks:[],processingMs:90});}
+  assert.ok(c.sampleInterval()>=120&&c.sampleInterval()<=160);
+  for(let i=0;i<30;i++){h.push();h.advance(5);w.reply({type:'frame',generation:c.generation,tracks:[],processingMs:4});}
+  assert.ok(c.sampleInterval()<40,'headroom must recover without source restart');
+  const before=c.sampleInterval();w.reply({type:'frame',generation:-1,tracks:[],processingMs:9000});
+  assert.equal(c.sampleInterval(),before);c.close();
+});
+test('diagnostics are bounded actual rates and allowlisted numbers, not target or payload text',()=>{
+  const h=harness(),c=h.client,w=h.worker;w.reply({type:'ready'});
+  for(let i=0;i<200;i++){
+    h.push();h.advance(40);w.reply({type:'frame',generation:c.generation,tracks:[],processingMs:6,diagnostics:{historyFrames:120,historyBytes:123,historyMs:3966,rejects:{'capture-frame-expired':4,'secret-url':100},losses:{'pixel-evidence-lost':2},pixels:'secret',label:'secret'}});
+  }
+  const d=c.diagnostics(h.now());
+  assert.ok(d.sampleHz>24&&d.sampleHz<=25.1);assert.ok(d.completionHz>24&&d.completionHz<=25.1);
+  assert.equal(d.processingMs,6);assert.equal(d.rejects['capture-frame-expired'],4);
+  assert.equal(d.losses['pixel-evidence-lost'],2);assert.doesNotMatch(JSON.stringify(d),/secret|url|label|pixels/);
+  const capture=h.push();h.advance(4000);c.seed(capture,[],0);
+  assert.equal(c.diagnostics(h.now()).rejects['capture-too-old'],1);
+  c.reset();assert.equal(c.diagnostics(h.now()).sampleHz,0);c.close();
+});
+
 test('cold start can become ready after 16 seconds but remains bounded at 60 seconds',()=>{
   const h=harness();h.advance(16000);
   assert.equal(h.client.worker,h.worker,'slow download/runtime must get more than 15 seconds');
