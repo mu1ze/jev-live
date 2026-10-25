@@ -7,8 +7,42 @@ const frame=new FrameState(4000), rate=new CompletionRate(5000);
 let running=false, pending=false, timer=null, stream=null, uploaded=null, photoURL=null;
 let sourceWidth=1, sourceHeight=1, serverKey=false, lastCapture=null;
 const boxNodes=new Map();
-const tracking=new TrackingClient(reason=>{if(reason==='failure'){frame.reset();clearBoxes();}if(running)render();});
-let sampleTimer=null, lastSample=0, lastVideoFrame=-1;
+const tracking=new TrackingClient(()=>{if(running)render();});
+let sampleTimer=null, lastSample=0, lastVideoFrame=-1, presentedFrame=0, videoCallback=null;
+let lastTrackingCapture=null, qualityFrame=-1, qualityChanged=0;
+// Prefer actual presented frames; older MediaStream implementations may expose
+// no quality API, throw, or leave totalVideoFrames at zero indefinitely.
+function watchVideo() {
+  const source=stream;
+  presentedFrame=0;qualityFrame=-1;qualityChanged=0;
+  if(typeof video.requestVideoFrameCallback!=='function')return;
+  const next=()=>{
+    if(!running||source!==stream)return;
+    presentedFrame++;
+    videoCallback=video.requestVideoFrameCallback(next);
+  };
+  videoCallback=video.requestVideoFrameCallback(next);
+}
+function videoFrame(now) {
+  if(typeof video.requestVideoFrameCallback==='function')return presentedFrame||null;
+  try {
+    const count=video.getVideoPlaybackQuality?.().totalVideoFrames;
+    if(Number.isFinite(count)&&count>0) {
+      if(count!==qualityFrame){qualityFrame=count;qualityChanged=now;}
+      if(now-qualityChanged<160)return `quality:${count}`;
+    }
+  } catch { /* Optional browser capability, not a camera failure. */ }
+  return now-lastSample>=80?`time:${now}`:null;
+}
+function trackingFrame(now) {
+  if(!tracking.ready)return null;
+  const mediaFrame=videoFrame(now);
+  if(mediaFrame!==null&&mediaFrame===lastVideoFrame)return now-lastSample<80?lastTrackingCapture:null;
+  if(mediaFrame===null||tracking.busy||now-lastSample<65)return null;
+  const capture=tracking.push(snapshotCanvas,snapshotContext,now);
+  if(capture){lastSample=now;lastVideoFrame=mediaFrame;lastTrackingCapture=capture;}
+  return capture;
+}
 function text(id,value) { if($(id).textContent!==value) $(id).textContent=value; }
 function style(node,key,value) { if(node.style[key]!==value) node.style[key]=value; }
 let failures=0, retryAt=0;
@@ -20,7 +54,7 @@ function liveStatus() {
   status('Camera live','live'); text('stage-note',`LIVE PREVIEW · ${tracking.state.toUpperCase()}`);
 }
 function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('age','—'); text('results','No detections yet. Camera mode can track visually supported objects.'); }
-function reset() { frame.reset();tracking.engaged=false;tracking.reset();lastVideoFrame=-1; rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
+function reset() { frame.reset();tracking.engaged=false;tracking.reset();lastVideoFrame=-1;lastTrackingCapture=null;lastSample=0; rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
 function fail(message) { clearBoxes(); $('error').textContent=message; $('error').hidden=false; status('Needs attention'); }
 function clearError() { $('error').hidden=true; $('error').textContent=''; }
 function credentials() {
@@ -31,6 +65,8 @@ function credentials() {
 }
 function updateButtons() { $('start').disabled=running; $('analyze').disabled=!uploaded || pending || running; }
 function stop() {
+  if(videoCallback!==null)video.cancelVideoFrameCallback?.(videoCallback);
+  videoCallback=null;
   running=false; clearInterval(sampleTimer);sampleTimer=null;tracking.close();reset(); $('results').setAttribute('aria-busy','false');
   if(stream) stream.getTracks().forEach(track=>track.stop());
   stream=null; video.srcObject=null;
@@ -55,9 +91,7 @@ function sample() {
   if(!running||document.hidden||!tracking.ready||tracking.busy||video.readyState<2)return;
   const now=performance.now();
   if(now-lastSample<65)return;
-  const mediaFrame=video.getVideoPlaybackQuality().totalVideoFrames;
-  if(mediaFrame===lastVideoFrame)return;
-  try {drawSnapshot(video,video.videoWidth,video.videoHeight);tracking.push(snapshotCanvas,snapshotContext,now);lastSample=now;lastVideoFrame=mediaFrame;}
+  try {drawSnapshot(video,video.videoWidth,video.videoHeight);trackingFrame(now);}
   catch {tracking.failure();}
 }
 function schedule() {
@@ -69,8 +103,6 @@ function schedule() {
 }
 async function detect(single) {
   if(pending || (!single && (!running || document.hidden))) return;
-  if(!single&&tracking.worker&&!tracking.ready){clearTimeout(timer);timer=setTimeout(()=>detect(false),50);return;}
-  if(!single&&tracking.ready&&(tracking.busy||video.getVideoPlaybackQuality().totalVideoFrames===lastVideoFrame)){clearTimeout(timer);timer=setTimeout(()=>detect(false),10);return;}
   if(!single && performance.now()<retryAt) {schedule();return;}
   const epoch=frame.epoch;
   let payload,capture=null;
@@ -81,10 +113,7 @@ async function detect(single) {
     sourceWidth=single?photo.naturalWidth:video.videoWidth;
     sourceHeight=single?photo.naturalHeight:video.videoHeight;
     payload.image=snapshot(source,sourceWidth,sourceHeight); payload.format='jpg';
-    if(!single&&tracking.ready) {
-      const mediaFrame=video.getVideoPlaybackQuality().totalVideoFrames;
-      if(mediaFrame!==lastVideoFrame){capture=tracking.push(snapshotCanvas,snapshotContext,performance.now());lastSample=performance.now();lastVideoFrame=mediaFrame;}
-    }
+    if(!single)capture=trackingFrame(performance.now());
   } catch(e) { backoff(); fail(e.message); schedule(); return; }
   const captured=performance.now(); lastCapture=captured;
   pending=true; updateButtons(); clearError(); $('results').setAttribute('aria-busy','true');
@@ -135,7 +164,7 @@ async function start() {
     await video.play();
     if(epoch!==frame.epoch || !running) return;
     $('source-label').textContent='LIVE CAMERA'; liveStatus();
-    tracking.start();sampleTimer=setInterval(sample,20);
+    watchVideo();tracking.start();sampleTimer=setInterval(sample,20);
     stream.getVideoTracks()[0].addEventListener('ended',()=>{if(running){stop();fail('Camera disconnected. Reconnect and Start again.');}});
     detect(false);
   } catch(e) {

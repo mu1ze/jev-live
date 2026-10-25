@@ -375,6 +375,11 @@ class BrowserTests(unittest.TestCase):
             self.assertTrue(page.locator('#photo').is_hidden())
             with self.subTest(behavior='Analyze disabled between camera requests'):
                 self.assertTrue(page.locator('#analyze').is_disabled())
+            # Preview no longer waits for worker load; synchronize the initial
+            # legitimate camera request before testing the Analyze click guard.
+            if not requests:
+                with page.expect_request('**/api/detect'):
+                    page.wait_for_timeout(20)
             count=len(requests)
             page.locator('#analyze').dispatch_event('click')
             page.wait_for_timeout(150)

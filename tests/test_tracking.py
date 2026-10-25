@@ -205,7 +205,14 @@ class TrackingTests(unittest.TestCase):
                     elif action=='stall':page.evaluate('window.freeze=true')
                     elif action=='worker-stall':page.evaluate('workers[0].onmessage=null')
                     else:page.evaluate("workers[0].dispatchEvent(new ErrorEvent('error'))")
-                    page.wait_for_function("() => !document.querySelector('.box')",timeout=1000)
+                    if action=='worker-error':
+                        page.wait_for_function("() => !document.querySelector('.box[data-track-id]')",timeout=1000)
+                        # Worker failure must not discard independent, still-fresh
+                        # snapshot recognition. It expires at its capture TTL.
+                        if page.locator('.box').count():self.assertIn('snapshot',page.locator('.box').inner_text())
+                        page.wait_for_function("() => !document.querySelector('.box')",timeout=4500)
+                    else:
+                        page.wait_for_function("() => !document.querySelector('.box')",timeout=1000)
                     page.wait_for_timeout(150);self.assertEqual(page.locator('.box').count(),0)
                     if action in ('worker-error','worker-stall'):
                         page.wait_for_function("() => document.querySelector('#stage-note').textContent.includes('SNAPSHOT FALLBACK')",timeout=12000)
@@ -214,13 +221,13 @@ class TrackingTests(unittest.TestCase):
             browser.close()
 
     def test_pixels_move_independently_and_weak_semantics_preserve_ids(self):
-        harness=test_server.HTTPTests();calls=[]
+        harness=test_server.HTTPTests();calls=[];weak=False
         def upstream(req):
             calls.append(time.monotonic());time.sleep(.12)
             answers={}
             for i,(x,y) in enumerate(((60,70),(440,190))):
                 answers[f'target_{i}_visible']={'type':'noul','noul':.96}
-                answers[f'target_{i}']={'type':'box','confidence':.9 if len(calls)==1 else .1,'box':dict(left=x/640,right=(x+100)/640,top=y/360,bottom=(y+100)/360)}
+                answers[f'target_{i}']={'type':'box','confidence':.1 if weak else .9,'box':dict(left=x/640,right=(x+100)/640,top=y/360,bottom=(y+100)/360)}
             return {'answers':answers}
         with harness.running(transport=upstream),sync_playwright() as pw:
             browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
@@ -230,6 +237,9 @@ class TrackingTests(unittest.TestCase):
             self.assertFalse(any('opencv' in url or 'worker' in url for _,url in requests))
             page.locator('#key').fill('fixture-only');page.locator('#labels').fill('chapstick, wallet');page.locator('#cadence').select_option('1000');page.locator('#start').click()
             page.wait_for_function("() => document.querySelectorAll('.box[data-track-id]').length===2",timeout=20000)
+            # Early recognition during cold loading has no worker frame to seed.
+            # Weaken semantics only after the first actual measured tracks exist.
+            weak=True
             page.evaluate("window.nodes=[...document.querySelectorAll('.box')];window.positions=nodes.map(n=>parseFloat(n.style.left))")
             # Only image pixels move; no updated coordinates enter the tracker.
             for step in range(1,13):page.evaluate('(x)=>window.dx=x',step*2);page.wait_for_timeout(75)
