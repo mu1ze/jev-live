@@ -217,11 +217,12 @@ function render() {
       const label=document.createElement('span'); label.className='box-label';
       box.append(label); boxNodes.set(key,box); $('boxes').append(box);
       if(detection.tracked)box.dataset.trackId=detection.id;
+      box.dataset.mode=detection.tracked?'tracked':'recognition-only';
     }
     const dims=projectBox(detection.box,sourceWidth,sourceHeight,rect.width,rect.height);
     for(const [k,v] of Object.entries(dims)) style(box,k,`${v}px`);
     const label=box.firstChild;
-    const caption=`${detection.label} · ${Math.round(detection.confidence*100)}% recognition${detection.tracked?' · pixel tracking':' · snapshot'}`;
+    const caption=`${detection.label} · ${Math.round(detection.confidence*100)}% recognition${detection.tracked?' · pixel tracking':' · recognition only · not tracking'}`;
     if(label.textContent!==caption) label.textContent=caption;
     style(label,'bottom',dims.top<27?'auto':''); style(label,'top',dims.top<27?'0px':'');
   }
