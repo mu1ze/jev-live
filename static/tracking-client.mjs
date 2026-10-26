@@ -1,6 +1,6 @@
 // Main thread: bounded transfers only. No optical flow or runtime on UI thread.
 export class TrackingClient {
-  constructor(onchange) {this.onchange=onchange;this.generation=0;this.serial=0;this.tracks=[];this.ready=false;this.busy=false;this.state='tracker initialization pending';this.lastMeasured=0;this.clearDiagnostics();}
+  constructor(onchange) {this.onchange=onchange;this.generation=0;this.serial=0;this.tracks=[];this.lossCutoffs=new Map();this.ready=false;this.busy=false;this.state='tracker initialization pending';this.lastMeasured=0;this.clearDiagnostics();}
   clearDiagnostics() {this.samples=[];this.completions=[];this.metricStart=performance.now();this.turnaround=0;this.processingMs=0;this.replayMs=0;this.workerStats={};this.localRejects={};}
   sampleInterval() {return Math.min(160,Math.max(1000/30,this.turnaround*1.35));}
   record(list,now) {list.push(now);while(list.length>180||list[0]<now-5000)list.shift();}
@@ -41,6 +41,11 @@ export class TrackingClient {
           } else this.replayMs=Number.isFinite(m.seedResult?.replayMs)?Math.max(0,Math.min(10000,m.seedResult.replayMs)):0;
           this.workerStats=m.diagnostics||this.workerStats;
           this.workerStats=this.diagnostics(now); // discard all non-allowlisted fields immediately
+          // Loss time is measured capture time, never semantic response arrival.
+          // Old snapshots cannot restore geometry rejected by newer pixel evidence.
+          const ids=new Set(m.tracks.map(t=>t.id));
+          for(const t of this.tracks)if(!ids.has(t.id))this.lossCutoffs.set(t.label,Math.max(this.lossCutoffs.get(t.label)||0,m.measured||this.lastMeasured));
+          for(const [label,cutoff] of this.lossCutoffs)if(now-cutoff>=350)this.lossCutoffs.delete(label);
           this.tracks=m.tracks;this.lastMeasured=m.measured||0;if(this.tracks.length)this.engaged=true;
           this.state=this.tracks.length?'measured pixel tracking':'no supported pixel tracks · snapshot detection';
           this.onchange();
@@ -56,7 +61,7 @@ export class TrackingClient {
     return category+line;
   }
   failure(code='frame-capture-error',detail='') {this.close();this.failureCode=code;this.failureDetail=detail;this.state=`tracker unavailable · snapshot fallback · ${code}${detail?' · '+detail:''}`;this.onchange('failure');}
-  reset() {this.clearDiagnostics();this.generation++;this.tracks=[];this.busy=false;this.lastMeasured=0;this.worker?.postMessage({type:'reset'});this.onchange();}
+  reset() {this.clearDiagnostics();this.generation++;this.tracks=[];this.lossCutoffs.clear();this.busy=false;this.lastMeasured=0;this.worker?.postMessage({type:'reset'});this.onchange();}
   close() {clearTimeout(this.loadTimer);this.worker?.terminate();this.worker=null;this.ready=false;this.reset();}
   push(canvas,context,timestamp) {
     if(!this.ready||this.busy)return null;

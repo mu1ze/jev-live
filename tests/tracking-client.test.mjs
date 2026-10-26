@@ -93,3 +93,24 @@ test('slow responsive frame hides stale evidence without killing worker or queue
   const fresh=h.push();w.reply({type:'frame',generation:c.generation,measured:fresh.timestamp,tracks:[{id:'two',label:'fixture',confidence:.9,box:[.1,0,.5,.5]}]});
   assert.equal(c.current(h.now()).length,1);assert.equal(w.terminated,undefined);c.close();
 });
+
+
+test('lost tracks cut off same or older semantic captures, bounded and generation isolated',()=>{
+  const h=harness(),c=h.client,w=h.worker;w.reply({type:'ready'});
+  const t={id:'one',label:'fixture',confidence:.9,box:[0,0,.5,.5]};
+  w.reply({type:'frame',generation:c.generation,measured:100,tracks:[t]});
+  h.advance(50);
+  w.reply({type:'frame',generation:c.generation,measured:150,tracks:[]});
+  assert.equal(c.lossCutoffs?.get('fixture'),150);
+  w.reply({type:'seed',generation:c.generation,measured:160,tracks:[]});
+  assert.equal(c.lossCutoffs.get('fixture'),150,'absence must not advance loss forever');
+  c.reset();assert.equal(c.lossCutoffs.size,0);
+  w.reply({type:'frame',generation:c.generation-1,measured:200,tracks:[t]});
+  w.reply({type:'frame',generation:c.generation-1,measured:210,tracks:[]});
+  assert.equal(c.lossCutoffs.size,0);
+  w.reply({type:'frame',generation:c.generation,measured:150,tracks:[t]});
+  w.reply({type:'seed',generation:c.generation,measured:160,tracks:[]});
+  assert.equal(c.lossCutoffs.get('fixture'),160,'seed/replay loss also cuts off snapshots');
+  h.advance(400);w.reply({type:'frame',generation:c.generation,measured:h.now(),tracks:[]});
+  assert.equal(c.lossCutoffs.size,0,'expired cutoffs are bounded');c.close();
+});
