@@ -105,17 +105,18 @@ async function detect(single) {
   if(pending || (!single && (!running || document.hidden))) return;
   if(!single && performance.now()<retryAt) {schedule();return;}
   const epoch=frame.epoch;
-  let payload,capture=null;
+  let payload,capture=null,captured;
   try {
     payload=credentials();
     if(!single && video.readyState<2) { schedule(); return; }
     const source=single?photo:video;
     sourceWidth=single?photo.naturalWidth:video.videoWidth;
     sourceHeight=single?photo.naturalHeight:video.videoHeight;
+    captured=performance.now();
     payload.image=snapshot(source,sourceWidth,sourceHeight); payload.format='jpg';
     if(!single)capture=trackingFrame(performance.now());
   } catch(e) { backoff(); fail(e.message); schedule(); return; }
-  const captured=performance.now(); lastCapture=captured;
+  lastCapture=captured;
   pending=true; updateButtons(); clearError(); $('results').setAttribute('aria-busy','true');
   if(single) {status('Asking Jev…','busy');text('stage-note','ANALYZING SELECTED IMAGE');}
   else liveStatus();

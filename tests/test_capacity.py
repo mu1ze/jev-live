@@ -23,6 +23,8 @@ class CapacityTests(unittest.TestCase):
             return {'answers':answers}
         camera = """
         window.trace={seeds:[],frames:[],inputs:[]};
+        const encode=HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL=function(...args){trace.semanticCapture=performance.now();const until=performance.now()+20;while(performance.now()<until){}return encode.apply(this,args);};
         const NativeWorker=Worker;
         window.Worker=class extends NativeWorker {
             constructor(...args){super(...args);this.addEventListener('message',e=>{
@@ -64,6 +66,7 @@ class CapacityTests(unittest.TestCase):
                         page.wait_for_function(f"() => document.querySelectorAll('.box[data-track-id]').length==={textured} && trace.frames.at(-1)==={textured}")
                         page.wait_for_function("() => document.querySelectorAll('.box').length===6")
                         result=page.evaluate("""() => ({
+                            capturedBeforeEncode:trace.frame.captured<=trace.semanticCapture,
                             dom:document.querySelectorAll('.box').length,
                             trackedDOM:document.querySelectorAll('.box[data-track-id]').length,
                             gateway:trace.frame.items.length,
@@ -73,6 +76,7 @@ class CapacityTests(unittest.TestCase):
                             seed:trace.seeds.at(-1).seedResult,
                             seedInputs:trace.inputs,frameCounts:trace.frames.slice(-5)
                         })""")
+                        self.assertTrue(result['capturedBeforeEncode'])
                         self.assertEqual(result['dom'],6)
                         self.assertEqual(result['trackedDOM'],textured)
                         self.assertEqual(result['current'],textured)
