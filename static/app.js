@@ -7,7 +7,7 @@ const frame=new FrameState(4000), rate=new CompletionRate(5000);
 let running=false, pending=false, timer=null, stream=null, uploaded=null, photoURL=null;
 let sourceWidth=1, sourceHeight=1, serverKey=false, lastCapture=null;
 const boxNodes=new Map();
-const tracking=new TrackingClient(reason=>{if(reason==='failure')frame.reset();if(running)render();});
+const tracking=new TrackingClient(reason=>{if(reason==='failure'){frame.items=[];frame.captured=0;}if(running)render();});
 let sampleTimer=null, lastSample=0, lastVideoFrame=-1, presentedFrame=0, videoCallback=null;
 let lastTrackingCapture=null, qualityFrame=-1, qualityChanged=0;
 // Prefer actual presented frames; older MediaStream implementations may expose

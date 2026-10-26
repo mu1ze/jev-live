@@ -30,7 +30,7 @@ class BrowserTests(unittest.TestCase):
                 page.evaluate('(items)=>window.reply(items)', [] if box is None else [{'label':'coffee mug','confidence':confidence,'box':box}])
             answer(.88,dict(left=.1,right=.7,top=.2,bottom=.8))
             page.wait_for_function("() => document.querySelector('.box-label')?.textContent.includes('88%')")
-            self.assertIn('snapshot',page.locator('.box-label').inner_text())
+            self.assertIn('recognition only · not tracking',page.locator('.box-label').inner_text())
             self.assertEqual(page.locator('.box[data-track-id]').count(),0)
             page.evaluate("window.firstBox=document.querySelector('.box')")
             answer(.91,dict(left=.2,right=.6,top=.1,bottom=.5))
