@@ -32,5 +32,10 @@ export class FrameState {
     if(epoch !== this.epoch || now-captured >= this.ttl) return false;
     this.items=items; this.captured=captured; return true;
   }
+  liveVisible(now, threshold, tracks, lossCutoffs=new Map()) {
+    const labels=new Set(tracks.map(t=>t.label));
+    const snapshots=now-this.captured<350 ? this.visible(now,threshold).filter(d=>!labels.has(d.label)&&this.captured>(lossCutoffs.get(d.label)??-Infinity)) : [];
+    return [...tracks,...snapshots];
+  }
   visible(now, threshold) { return now-this.captured < this.ttl ? this.items.filter(d=>d.confidence >= threshold) : []; }
 }

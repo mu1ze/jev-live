@@ -197,7 +197,7 @@ async function upload() {
 function render() {
   const now=performance.now();
   const tracks=running&&!document.hidden?tracking.current(now):[];
-  const items=running&&document.hidden?[]:tracks.length||running&&tracking.engaged&&tracking.ready?tracks:frame.visible(now,Number($('confidence').value));
+  const items=document.hidden?[]:running?frame.liveVisible(now,Number($('confidence').value),tracks,tracking.lossCutoffs):frame.visible(now,Number($('confidence').value));
   if(running&&!document.hidden)liveStatus();
   text('rate',`${rate.value(now).toFixed(1)} /s`);
   if($('tracking-details').parentElement.open) {

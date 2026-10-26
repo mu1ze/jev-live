@@ -62,6 +62,7 @@ class CapacityTests(unittest.TestCase):
                         page.locator('#start').click()
                         page.wait_for_function('() => trace.seeds.some(s=>s.tracks.length>0)',timeout=15000)
                         page.wait_for_function(f"() => document.querySelectorAll('.box[data-track-id]').length==={textured} && trace.frames.at(-1)==={textured}")
+                        page.wait_for_function("() => document.querySelectorAll('.box').length===6")
                         result=page.evaluate("""() => ({
                             dom:document.querySelectorAll('.box').length,
                             trackedDOM:document.querySelectorAll('.box[data-track-id]').length,
@@ -72,7 +73,7 @@ class CapacityTests(unittest.TestCase):
                             seed:trace.seeds.at(-1).seedResult,
                             seedInputs:trace.inputs,frameCounts:trace.frames.slice(-5)
                         })""")
-                        self.assertEqual(result['dom'],textured)
+                        self.assertEqual(result['dom'],6)
                         self.assertEqual(result['trackedDOM'],textured)
                         self.assertEqual(result['current'],textured)
                         self.assertEqual(result['gateway'],6)
