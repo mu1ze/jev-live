@@ -2,6 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {existsSync} from 'node:fs';
 const modulePath = new URL('../static/core.mjs', import.meta.url);
+test('mixed camera visibility uses strict capture age, label dedupe and loss cutoffs', async()=>{
+  const {FrameState}=await import(modulePath),f=new FrameState(4000);
+  const tracked={id:'1',label:'mug',confidence:.9,tracked:true};
+  const mug={label:'mug',confidence:.9},person={label:'person',confidence:.9};
+  f.accept(f.epoch,[mug,person],100,110);
+  assert.deepEqual(f.liveVisible(449.999,.7,[tracked]),[tracked,person]);
+  assert.deepEqual(f.liveVisible(450,.7,[tracked]),[tracked]);
+  assert.deepEqual(f.liveVisible(451,.7,[]),[],'late semantic response cannot refresh geometry');
+  assert.deepEqual(f.visible(450,.7),[mug,person],'stills retain their four-second TTL');
+  assert.deepEqual(f.visible(4100,.7),[]);
+  const cutoffs=new Map([['mug',150]]);
+  assert.deepEqual(f.liveVisible(160,.7,[],cutoffs),[person]);
+  f.accept(f.epoch,[mug],150,160);
+  assert.deepEqual(f.liveVisible(160,.7,[],cutoffs),[],'same-capture snapshot cannot resurrect loss');
+  f.accept(f.epoch,[mug],151,160);
+  assert.deepEqual(f.liveVisible(160,.7,[],cutoffs),[mug],'newer capture can recognize again');
+  f.accept(f.epoch,[{...mug,confidence:.2}],170,180);
+  assert.deepEqual(f.liveVisible(180,.95,[tracked]),[tracked],'weak semantics do not remove supported pixels');
+  f.reset();assert.deepEqual(f.liveVisible(180,.7,[]),[]);
+});
 test('letterbox projection matches contained image at any aspect ratio', async () => {
   assert.ok(existsSync(modulePath), 'projection module not implemented');
   const {projectBox} = await import(modulePath);
