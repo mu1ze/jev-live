@@ -95,6 +95,23 @@ test('slow responsive frame hides stale evidence without killing worker or queue
 });
 
 
+test('display expiry preserves identities until delayed loss can suppress older snapshots',async()=>{
+  const {FrameState}=await import('../static/core.mjs');
+  const h=harness(),c=h.client,w=h.worker;w.reply({type:'ready'});
+  const t={id:'one',label:'fixture',confidence:.9,box:[0,0,.5,.5]};
+  const d={label:'fixture',confidence:.9,box:{left:0,top:0,right:.5,bottom:.5}};
+  w.reply({type:'frame',generation:c.generation,measured:100,tracks:[t]});
+  h.advance(351);
+  const state=new FrameState();state.accept(state.epoch,[d],300,h.now());
+  assert.equal(c.current(h.now()).length,0,'expired pixels must remain hidden');
+  h.advance(1);w.reply({type:'frame',generation:c.generation,measured:400,tracks:[]});
+  assert.equal(c.lossCutoffs.get('fixture'),400,'display expiry must not erase loss comparison state');
+  assert.equal(state.liveVisible(h.now(),.7,c.current(h.now()),c.lossCutoffs).length,0,'newer loss evidence must suppress the 300ms snapshot');
+  state.accept(state.epoch,[d],h.now(),h.now());
+  assert.equal(state.liveVisible(h.now(),.7,c.current(h.now()),c.lossCutoffs).length,1,'a new post-loss recognition is independent evidence');
+  c.close();
+});
+
 test('lost tracks cut off same or older semantic captures, bounded and generation isolated',()=>{
   const h=harness(),c=h.client,w=h.worker;w.reply({type:'ready'});
   const t={id:'one',label:'fixture',confidence:.9,box:[0,0,.5,.5]};

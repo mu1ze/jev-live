@@ -86,7 +86,8 @@ export class TrackingClient {
     // Visual evidence expires quickly; worker liveness has a separate bounded budget.
     // A slow frame/replay must not kill a responsive worker or expose stale boxes.
     if(this.busy&&now-this.busySince>10000)this.failure('frame-timeout','no frame reply within 10s');
-    if(this.lastMeasured&&now-this.lastMeasured>350)this.tracks=[];
+    // Hide expired geometry without erasing identities needed by delayed loss replies.
+    if(this.lastMeasured&&now-this.lastMeasured>350)return [];
     return this.tracks.map(t=>({id:`${this.generation}:${t.id}`,label:t.label,confidence:t.confidence,tracked:true,box:{left:t.box[0],top:t.box[1],right:t.box[0]+t.box[2],bottom:t.box[1]+t.box[3]}}));
   }
 }
