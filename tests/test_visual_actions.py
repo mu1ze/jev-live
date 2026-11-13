@@ -42,6 +42,37 @@ class VisualActionBrowserTests(unittest.TestCase):
         # serial request immediately, so aria-busy=false may be too brief to poll.
         self.page.evaluate('() => new Promise(resolve => setTimeout(resolve, 0))')
 
+    def test_actions_cold_start_has_only_serial_video_snapshots(self):
+        p=self.page
+        p.evaluate("""async () => {
+            window.overhead={workers:0,reads:0,callbacks:0,samplers:0,current:0,seeds:0,diagnostics:0,draws:0,accepted:[]};
+            const NativeWorker=Worker;window.Worker=class extends NativeWorker{constructor(...a){super(...a);overhead.workers++}};
+            const read=CanvasRenderingContext2D.prototype.getImageData,draw=CanvasRenderingContext2D.prototype.drawImage;
+            CanvasRenderingContext2D.prototype.getImageData=function(...a){overhead.reads++;return read.apply(this,a)};
+            CanvasRenderingContext2D.prototype.drawImage=function(...a){if(a[0] instanceof HTMLVideoElement){overhead.draws++;window.lastDraw=performance.now()}return draw.apply(this,a)};
+            const cb=HTMLVideoElement.prototype.requestVideoFrameCallback;
+            HTMLVideoElement.prototype.requestVideoFrameCallback=function(...a){overhead.callbacks++;return cb.apply(this,a)};
+            const interval=window.setInterval;window.setInterval=(fn,ms,...a)=>{if(ms===20)overhead.samplers++;return interval(fn,ms,...a)};
+            const {TrackingClient}=await import('/tracking-client.mjs');
+            for(const [method,key] of [['current','current'],['seed','seeds'],['diagnostics','diagnostics']]){
+                const original=TrackingClient.prototype[method];TrackingClient.prototype[method]=function(...a){overhead[key]++;return original.apply(this,a)};
+            }
+            const {ActionView}=await import('/action-view.mjs'),accept=ActionView.prototype.accept;
+            ActionView.prototype.accept=function(items,captured,...a){overhead.accepted.push(Math.abs(captured-window.lastDraw));return accept.call(this,items,captured,...a)};
+        }""")
+        requests=[];p.on('request',lambda req:requests.append(req.url))
+        p.locator('#labels').fill('bottle');p.locator('[data-preset="bottle"]').click();p.locator('#actions-enabled').check()
+        p.locator('#start').click();p.wait_for_function('() => !!window.reply');p.wait_for_timeout(500)
+        self.assertEqual(p.evaluate('overhead.draws'),1,'pending semantics must not sample pixels')
+        self.answer();self.answer();self.answer();self.answer()
+        self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool')
+        self.assertEqual(p.locator('.box').count(),0)
+        metrics=p.evaluate('overhead')
+        self.assertEqual({k:metrics[k] for k in ('workers','reads','callbacks','samplers','current','seeds','diagnostics')},dict.fromkeys(('workers','reads','callbacks','samplers','current','seeds','diagnostics'),0),metrics)
+        self.assertTrue(all(delta<20 for delta in metrics['accepted']),metrics)
+        self.assertFalse(any(any(asset in url for asset in ('tracking-worker','opencv.js','tracker-classic')) for url in requests),requests)
+        self.assertIn('RECOGNITION ONLY',p.locator('#stage-note').inner_text())
+
     def test_workflow_default_tracking_is_exclusive_and_mobile(self):
         p=self.page
         p.reload();p.locator('#key').fill('local-fixture-key')

@@ -10,6 +10,9 @@ function workflowUI() {
   const active=actionMode();
   document.querySelector('.visual-actions').hidden=!active;
   document.querySelectorAll('.tracking-details').forEach(node=>node.hidden=active);
+  $('target-identifiers').hidden=!active;
+  text('confidence-help',active?'Only recognition at or above this threshold contributes to actions and target identifiers.':'Recognition seeds new tracks above this threshold. Supported pixel tracks survive weak recognition.');
+  text('cadence-help',active?'Recognition target · one request at a time · 640 px snapshots. Each request captures the native video directly; no tracking worker, pixel sampling or live boxes.':'Recognition target, not tracking FPS. One request at a time · 640 px snapshots. Local pixel tracking between requests; live recognition-only boxes expire after 350 ms from capture, still-image boxes after 4s. Tracks need revalidation within 10s.');
   text('workflow-description',active?'Actions · image recognition only. Native preview and optional local reactions; no pixel tracking or box overlays.':'Detection and local pixel tracking · measured boxes between recognition requests. Actions do not run.');
 }
 const frame=new FrameState(4000), rate=new CompletionRate(5000);
@@ -59,7 +62,7 @@ function backoff() { failures=Math.min(failures+1,5); retryAt=performance.now()+
 function status(message, kind='') { text('status',message); const name=`state-badge ${kind}`; if($('badge').className!==name) $('badge').className=name; }
 function liveStatus() {
   if(document.hidden) return;
-  status('Camera live','live'); text('stage-note',`LIVE PREVIEW · ${tracking.state.toUpperCase()}`);
+  status('Camera live','live'); text('stage-note',actionMode()?'LIVE PREVIEW · ACTIONS / RECOGNITION ONLY':`LIVE PREVIEW · ${tracking.state.toUpperCase()}`);
 }
 function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('tracked-count','0'); text('age','—'); text('results','No detections yet. Camera mode can track visually supported objects.'); }
 function reset() { geometryCutoff=0;actions.reset();frame.reset();tracking.engaged=false;tracking.reset();lastVideoFrame=-1;lastTrackingCapture=null;lastSample=0; rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
@@ -96,7 +99,7 @@ function drawSnapshot(source,w,h) {
   snapshotContext.drawImage(source,0,0,size.width,size.height);
 }
 function sample() {
-  if(!running||document.hidden||!tracking.ready||tracking.busy||video.readyState<2)return;
+  if(actionMode()||!running||document.hidden||!tracking.ready||tracking.busy||video.readyState<2)return;
   const now=performance.now();
   const mediaFrame=videoFrame(now);
   if(now-lastSample+1<tracking.sampleInterval()||mediaFrame===null||mediaFrame===lastVideoFrame)return;
@@ -124,13 +127,13 @@ async function detect(single) {
     captured=performance.now();
     // Encode the exact most recently submitted pixels, not a newly drawn image
     // paired with an unrelated/throttled capture ID. Never wait for the worker.
-    if(!single&&tracking.ready&&lastTrackingCapture?.generation===tracking.generation&&captured-lastTrackingCapture.timestamp<350) {
+    if(!actionMode()&&!single&&tracking.ready&&lastTrackingCapture?.generation===tracking.generation&&captured-lastTrackingCapture.timestamp<350) {
       capture=lastTrackingCapture;captured=capture.timestamp;
       payload.image=snapshotCanvas.toDataURL('image/jpeg',.82).split(',')[1];
     } else {
       lastTrackingCapture=null;
       payload.image=snapshot(source,sourceWidth,sourceHeight);
-      if(!single&&tracking.ready&&!tracking.busy) {
+      if(!actionMode()&&!single&&tracking.ready&&!tracking.busy) {
         capture=tracking.push(snapshotCanvas,snapshotContext,captured);
         if(capture){lastSample=captured;lastVideoFrame=videoFrame(captured);lastTrackingCapture=capture;}
       }
@@ -156,19 +159,19 @@ async function detect(single) {
     if(!single) rate.record(now);
     $('latency').textContent=`${((now-requestStarted)/1000).toFixed(2)} s`;
     if(frame.accept(epoch,data.detections,captured,now)) {
-      if(!single)tracking.seed(capture,data.detections,Number($('confidence').value));
-      if(single) {status('Image analyzed','live');text('stage-note','SNAPSHOT RESULT · EXPIRES 4s AFTER CAPTURE');}
+      if(!actionMode()&&!single)tracking.seed(capture,data.detections,Number($('confidence').value));
+      if(single) {status('Image analyzed','live');text('stage-note',actionMode()?'RECOGNITION ONLY · RESULT EXPIRES 4s AFTER CAPTURE':'SNAPSHOT RESULT · EXPIRES 4s AFTER CAPTURE');}
       else liveStatus();
       render(true);
     } else {
-      if(single||!tracking.current(now).length)clearBoxes();
+      if(actionMode()||single||!tracking.current(now).length)clearBoxes();
       if(single) {status('Result too old');text('stage-note','RESULT EXPIRED · PREVIEW IS NOT TRACKING');}
     }
   } catch(e) {
     backoff();
     if(epoch===frame.epoch) {
       const message=e.name==='AbortError'?'Request timed out. Automatic retries are slowed down.':(e.message || 'Connection failed. Try again.');
-      if(!single&&tracking.current(performance.now()).length){text('error',message);$('error').hidden=false;liveStatus();}
+      if(!actionMode()&&!single&&tracking.current(performance.now()).length){text('error',message);$('error').hidden=false;liveStatus();}
       else fail(message);
     }
   } finally {
@@ -188,7 +191,7 @@ async function start() {
     await video.play();
     if(epoch!==frame.epoch || !running) return;
     $('source-label').textContent='LIVE CAMERA'; liveStatus();
-    watchVideo();tracking.start();sampleTimer=setInterval(sample,20);
+    if(!actionMode()){watchVideo();tracking.start();sampleTimer=setInterval(sample,20);}
     stream.getVideoTracks()[0].addEventListener('ended',()=>{if(running){stop();fail('Camera disconnected. Reconnect and Start again.');}});
     detect(false);
   } catch(e) {
@@ -220,14 +223,14 @@ async function upload() {
 }
 function render() {
   const now=performance.now();
-  actions.tick(now);
-  const tracks=running&&!document.hidden?tracking.current(now):[];
+  if(actionMode())actions.tick(now);
+  const tracks=!actionMode()&&running&&!document.hidden?tracking.current(now):[];
   // Worker failure invalidates prior geometry, not independent semantic results
   // or a newer capture whose recognition request is already in flight.
-  const items=document.hidden?[]:running?(frame.captured<=geometryCutoff?tracks:frame.liveVisible(now,Number($('confidence').value),tracks,tracking.lossCutoffs)):frame.visible(now,Number($('confidence').value));
+  const items=actionMode()||document.hidden?[]:running?(frame.captured<=geometryCutoff?tracks:frame.liveVisible(now,Number($('confidence').value),tracks,tracking.lossCutoffs)):frame.visible(now,Number($('confidence').value));
   if(running&&!document.hidden)liveStatus();
   text('rate',`${rate.value(now).toFixed(1)} /s`);
-  if($('tracking-details').parentElement.open) {
+  if(!actionMode()&&$('tracking-details').parentElement.open) {
     const d=tracking.diagnostics(now), counts=c=>Object.entries(c).map(([k,v])=>`${k}: ${v}`).join(', ')||'none';
     text('tracking-diagnostics',`Local only · rolling 5s · since source reset\nsample ${d.sampleHz.toFixed(1)} Hz · complete ${d.completionHz.toFixed(1)} Hz\nworker ${d.processingMs.toFixed(1)} ms · replay ${d.replayMs.toFixed(1)} ms\ncadence ${d.intervalMs.toFixed(0)} ms · history ${(d.historyMs/1000).toFixed(2)} s / ${d.historyFrames} frames / ${(d.historyBytes/1048576).toFixed(1)} MiB\nseed rejects: ${counts(d.rejects)}\ntrack losses: ${counts(d.losses)}`);
   }
@@ -256,7 +259,7 @@ function render() {
   const recognized=document.hidden?[]:frame.visible(now,Number($('confidence').value));
   text('count',String(recognized.length));
   text('tracked-count',String(items.filter(d=>d.tracked).length));
-  actions.identifiers(recognized,frame.captured,now);
+  if(actionMode())actions.identifiers(recognized,frame.captured,now);
   const fresh=frame.captured&&now-frame.captured<frame.ttl;
   text('results',recognized.length?`Last recognized · ${recognized.map(d=>`${d.label} · ${Math.round(d.confidence*100)}% recognition`).join('   /   ')} · captured result, not current location; expires 4s after capture.`:fresh?'Last recognition · No detections above threshold.':frame.captured?'Last recognition expired · awaiting a fresh result.':'No detections yet. Camera mode can track visually supported objects.');
   if(frame.captured) {
