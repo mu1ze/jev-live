@@ -58,8 +58,8 @@ export class ActionView {
     $('rule-editor-title').textContent='Edit rule';$('rule-label').focus();
   }
   deleteRule(id) {
-    this.rules=this.rules.filter(r=>r.id!==id);this.engine.rules=this.rules;
-    this.reset();this.renderRules();if(this.editId===id)this.clearEditor();$('rule-label').focus();
+    this.reset();this.rules=this.rules.filter(r=>r.id!==id);this.engine.rules=this.rules;
+    this.renderRules();if(this.editId===id)this.clearEditor();$('rule-label').focus();
   }
   reset() {
     for(const rule of this.engine.result([],[]).active)this.log(`${rule.label} → cleared (settings or source reset)`);

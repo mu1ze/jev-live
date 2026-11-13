@@ -96,6 +96,25 @@ class VisualActionBrowserTests(unittest.TestCase):
                 self.assertEqual(p.evaluate('window.fixtureToneStarts'),0)
                 p.locator('#stop').click()
 
+    def test_deleting_active_rule_logs_clear_and_removes_filter(self):
+        p=self.page
+        p.locator('#labels').fill('bottle');p.locator('[data-preset="bottle"]').click()
+        p.locator('#actions-enabled').check();p.locator('#start').click()
+        self.answer();self.answer()
+        p.wait_for_function("() => document.querySelector('#video').dataset.actionFilter==='cool'")
+        p.wait_for_function('() => !!window.reply')
+        p.locator('#action-rules').get_by_role('button',name='Delete').click()
+        self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None)
+        self.assertEqual(p.locator('#photo').get_attribute('data-action-filter'),None)
+        self.assertEqual(p.locator('#action-rules li').count(),0)
+        events=p.locator('#action-events li').all_text_contents()
+        self.assertEqual(len(events),2,'deleting an active rule records its clear event')
+        self.assertIn('bottle → cleared (settings or source reset)',events[0])
+        self.assertIn('bottle → Underwater / cool activated',events[1])
+        self.answer() # deletion also invalidates the in-flight capture
+        self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None)
+        self.assertEqual(p.locator('#action-events li').count(),2)
+
     def test_bounded_event_log_reset_and_rule_budget(self):
         p=self.page
         self.assertEqual(p.locator('#clear-action-events').count(),1,'local history has an explicit clear control')
