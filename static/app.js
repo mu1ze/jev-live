@@ -7,9 +7,9 @@ const $ = id => document.getElementById(id);
 const video=$('video'), photo=$('photo'), stage=$('stage');
 const frame=new FrameState(4000), rate=new CompletionRate(5000);
 let running=false, pending=false, timer=null, stream=null, uploaded=null, photoURL=null;
-let sourceWidth=1, sourceHeight=1, serverKey=false, lastCapture=null;
+let sourceWidth=1, sourceHeight=1, serverKey=false, lastCapture=null, geometryCutoff=0;
 const boxNodes=new Map();
-const tracking=new TrackingClient(reason=>{if(reason==='failure'){frame.items=[];frame.captured=0;}if(running)render();});
+const tracking=new TrackingClient(reason=>{if(reason==='failure')geometryCutoff=Math.max(geometryCutoff,frame.captured);if(running)render();});
 let sampleTimer=null, lastSample=0, lastVideoFrame=-1, presentedFrame=0, videoCallback=null;
 let lastTrackingCapture=null, qualityFrame=-1, qualityChanged=0;
 // Prefer actual presented frames; older MediaStream implementations may expose
@@ -54,8 +54,8 @@ function liveStatus() {
   if(document.hidden) return;
   status('Camera live','live'); text('stage-note',`LIVE PREVIEW · ${tracking.state.toUpperCase()}`);
 }
-function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('age','—'); text('results','No detections yet. Camera mode can track visually supported objects.'); }
-function reset() { actions.reset();frame.reset();tracking.engaged=false;tracking.reset();lastVideoFrame=-1;lastTrackingCapture=null;lastSample=0; rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
+function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('tracked-count','0'); text('age','—'); text('results','No detections yet. Camera mode can track visually supported objects.'); }
+function reset() { geometryCutoff=0;actions.reset();frame.reset();tracking.engaged=false;tracking.reset();lastVideoFrame=-1;lastTrackingCapture=null;lastSample=0; rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
 function fail(message) { clearBoxes(); $('error').textContent=message; $('error').hidden=false; status('Needs attention'); }
 function clearError() { $('error').hidden=true; $('error').textContent=''; }
 function credentials() {
@@ -215,7 +215,9 @@ function render() {
   const now=performance.now();
   actions.tick(now);
   const tracks=running&&!document.hidden?tracking.current(now):[];
-  const items=document.hidden?[]:running?frame.liveVisible(now,Number($('confidence').value),tracks,tracking.lossCutoffs):frame.visible(now,Number($('confidence').value));
+  // Worker failure invalidates prior geometry, not independent semantic results
+  // or a newer capture whose recognition request is already in flight.
+  const items=document.hidden?[]:running?(frame.captured<=geometryCutoff?tracks:frame.liveVisible(now,Number($('confidence').value),tracks,tracking.lossCutoffs)):frame.visible(now,Number($('confidence').value));
   if(running&&!document.hidden)liveStatus();
   text('rate',`${rate.value(now).toFixed(1)} /s`);
   if($('tracking-details').parentElement.open) {
@@ -244,8 +246,11 @@ function render() {
     if(label.textContent!==caption) label.textContent=caption;
     style(label,'bottom',dims.top<27?'auto':''); style(label,'top',dims.top<27?'0px':'');
   }
-  text('count',String(items.length));
-  text('results',items.length?items.map(d=>`${d.label} · ${Math.round(d.confidence*100)}% recognition · ${d.tracked?'pixel tracking':'snapshot only'}`).join('   /   '):frame.captured?'No fresh detections above threshold.':'No detections yet. Camera mode can track visually supported objects.');
+  const recognized=document.hidden?[]:frame.visible(now,Number($('confidence').value));
+  text('count',String(recognized.length));
+  text('tracked-count',String(items.filter(d=>d.tracked).length));
+  const fresh=frame.captured&&now-frame.captured<frame.ttl;
+  text('results',recognized.length?`Last recognized · ${recognized.map(d=>`${d.label} · ${Math.round(d.confidence*100)}% recognition`).join('   /   ')} · captured result, not current location; expires 4s after capture.`:fresh?'Last recognition · No detections above threshold.':frame.captured?'Last recognition expired · awaiting a fresh result.':'No detections yet. Camera mode can track visually supported objects.');
   if(frame.captured) {
     const age=now-frame.captured;
     text('age',age<frame.ttl?`${(age/1000).toFixed(1)} s`:'Expired');

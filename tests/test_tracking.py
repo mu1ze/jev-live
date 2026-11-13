@@ -17,6 +17,46 @@ draw();setInterval(draw,30);navigator.mediaDevices.getUserMedia=async()=>c.captu
 """
 
 class TrackingTests(unittest.TestCase):
+    def test_slow_semantics_remain_useful_without_live_geometry_and_expire(self):
+        harness=test_server.HTTPTests();positive=True
+        def upstream(req):
+            time.sleep(1.4)
+            return {'answers':{'target_0_visible':{'type':'noul','noul':.96 if positive else .01},'target_0':{'type':'box','confidence':.9,'box':dict(left=.2,right=.8,top=.2,bottom=.8)}}}
+        with harness.running(transport=upstream),sync_playwright() as pw:
+            browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+            try:
+                for loading in (True,False):
+                    with self.subTest(loading=loading):
+                        positive=True
+                        page=browser.new_page()
+                        page.add_init_script("""
+                            const c=document.createElement('canvas');c.width=640;c.height=360;
+                            c.getContext('2d').fillRect(0,0,640,360);
+                            setInterval(()=>c.getContext('2d').fillRect(0,0,640,360),83);
+                            navigator.mediaDevices.getUserMedia=async()=>c.captureStream(12);
+                            window.workers=[];const NativeWorker=Worker;
+                            window.Worker=class extends NativeWorker{constructor(...args){super(...args);workers.push(this)}};
+                        """)
+                        if loading:page.route('**/tracking-worker.js',lambda route:route.fulfill(body="setTimeout(()=>postMessage({type:'ready'}),16000)",content_type='text/javascript'))
+                        page.goto(f'http://127.0.0.1:{harness.port}/')
+                        page.locator('#key').fill('fixture-only');page.locator('#labels').fill('bottle');page.locator('#cadence').select_option('5000');page.locator('#start').click()
+                        page.wait_for_function("() => document.querySelector('#count').textContent==='1'",timeout=5000)
+                        self.assertIn('bottle',page.locator('#results').inner_text())
+                        self.assertIn('Last recognized',page.locator('#results').inner_text())
+                        self.assertEqual(page.locator('#tracked-count').inner_text(),'0')
+                        self.assertEqual(page.locator('.box').count(),0,'old response coordinates must never land on live preview')
+                        page.evaluate("workers[0].dispatchEvent(new ErrorEvent('error'))")
+                        self.assertEqual(page.locator('#count').inner_text(),'1','worker failure must not clear independent semantics')
+                        page.wait_for_function("() => document.querySelector('#age').textContent==='Expired'",timeout=4000)
+                        self.assertEqual(page.locator('#count').inner_text(),'0')
+                        positive=False
+                        page.locator('#cadence').select_option('250')
+                        page.wait_for_function("() => document.querySelector('#results').textContent.includes('No detections above threshold')",timeout=5000)
+                        self.assertEqual(page.locator('#count').inner_text(),'0')
+                        page.locator('#stop').click();page.wait_for_timeout(1500);page.close()
+            finally:
+                browser.close()
+
     def test_slow_12hz_recognition_uses_exact_sampled_pixels_not_throttle_slot(self):
         harness=test_server.HTTPTests()
         def upstream(req):
