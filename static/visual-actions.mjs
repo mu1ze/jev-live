@@ -13,9 +13,9 @@ export class VisualActions {
     const exited=[];
     for(const rule of this.rules) {
       const state=this.states.get(rule.id);
-      if(state&&now-state.positive>=2500) state.hits=0;
       if(state?.active&&(now-state.positive>=2500||(state.missing!==null&&now-state.missing>=1200))) {
-        state.active=false;state.hits=0;exited.push(rule);
+        // Effect expiry must not discard still-consecutive capture history.
+        state.active=false;exited.push(rule);
       }
     }
     return this.result([],exited);
@@ -28,7 +28,8 @@ export class VisualActions {
       const state=this.states.get(rule.id)||{hits:0,active:false,missing:null,next:0,positive:-Infinity};
       this.states.set(rule.id,state);
       if(items.some(d=>d.label===rule.label&&Number.isFinite(d.confidence)&&d.confidence<=1&&d.confidence>=Math.max(.7,threshold))) {
-        state.hits++;state.missing=null;state.positive=captured;
+        // Confirmation follows capture intervals, not render ticks or reply latency.
+        state.hits=captured-state.positive>=2500?1:state.hits+1;state.missing=null;state.positive=captured;
         if(state.hits>=2&&!state.active&&now>=state.next) {
           state.active=true;state.next=now+2000;entered.push(rule);
         }

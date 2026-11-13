@@ -65,6 +65,20 @@ class VisualActionBrowserTests(unittest.TestCase):
         self.answer()
         p.wait_for_function("() => document.querySelector('#video').dataset.actionFilter==='cool'")
 
+    def test_serial_1400ms_semantics_activate_without_live_boxes(self):
+        p=self.page
+        p.locator('#labels').fill('bottle');p.locator('[data-preset="bottle"]').click()
+        p.locator('#actions-enabled').check();p.locator('#start').click()
+        for _ in range(2):
+            p.wait_for_function('() => !!window.reply')
+            p.wait_for_timeout(1400)
+            self.answer()
+        p.wait_for_function("() => document.querySelector('#video').dataset.actionFilter==='cool'",timeout=1000)
+        self.assertEqual(p.locator('.box').count(),0,'slow recognition cannot display stale geometry')
+        self.assertEqual(p.locator('#action-events li').count(),1)
+        # No next answer: expiry must still use the last capture, not its arrival.
+        p.wait_for_function("() => !document.querySelector('#video').hasAttribute('data-action-filter')",timeout=1800)
+
     def test_delayed_audio_unlock_cannot_rearm_after_lifecycle_reset(self):
         p=self.page
         p.add_init_script("""

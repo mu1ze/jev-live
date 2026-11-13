@@ -24,6 +24,33 @@ test('freshness is capture-bounded at 2500ms even without negatives; duplicate a
   assert.equal(e.accept(positive,3250,3250).entered.length,1);
   e.reset();assert.equal(e.tick(3300).active.length,0);
 });
+test('serial 1400ms replies confirm by capture interval despite intermediate expiry ticks',()=>{
+  const e=engine();
+  assert.equal(e.accept(positive,0,1400).active.length,0);
+  assert.equal(e.tick(2500).active.length,0,'inactive evidence is not a current effect');
+  assert.equal(e.accept(positive,1400,2800).entered.length,1,'successive fresh captures confirm');
+  assert.equal(e.tick(3899).active.length,1);
+  assert.equal(e.tick(3900).active.length,0,'effect still expires at capture age 2500ms');
+});
+test('active expiry preserves recent capture confirmation through cooldown',()=>{
+  const e=engine();e.accept(positive,0,1400);e.accept(positive,1400,2800);
+  assert.equal(e.tick(3900).exited.length,1);
+  assert.equal(e.accept(positive,2800,4200).active.length,0,'cooldown still prevents early reentry');
+  assert.equal(e.accept(positive,4200,5600).entered.length,1,'recent confirmation survives expiry and cooldown');
+  const delayed=engine();delayed.accept(positive,0,1400);delayed.accept(positive,1400,2800);
+  delayed.tick(3900);
+  assert.equal(delayed.accept(positive,2800,5200).entered.length,1,'one delayed fresh successor retains confirmation after cooldown');
+});
+test('capture-gap boundary cannot be bypassed by late replies or missing render ticks',()=>{
+  for(const gap of [2499,2500,5000]) {
+    const e=engine();e.accept(positive,0,1400);
+    assert.equal(e.accept(positive,gap,gap+1400).entered.length,gap<2500?1:0,`capture gap ${gap}`);
+  }
+  const e=engine();e.accept(positive,0,1400);
+  e.accept([],1400,2800);
+  assert.equal(e.accept(positive,2800,4200).entered.length,0,'negative breaks slow confirmation');
+  assert.equal(e.accept(positive,4200,5600).entered.length,1);
+});
 test('confidence and exact labels break streaks; competing filters use rule order while cards coexist',()=>{
   const rules=[rule,{...rule,id:'warm',kind:'warm'},{...rule,id:'card',kind:'card',text:'<b>local</b>'}];
   const e=new mod.VisualActions(rules);
