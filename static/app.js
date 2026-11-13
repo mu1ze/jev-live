@@ -39,8 +39,7 @@ function videoFrame(now) {
 function trackingFrame(now) {
   if(!tracking.ready)return null;
   const mediaFrame=videoFrame(now);
-  if(mediaFrame!==null&&mediaFrame===lastVideoFrame)return now-lastSample<80?lastTrackingCapture:null;
-  if(mediaFrame===null||tracking.busy||now-lastSample+1<tracking.sampleInterval())return null;
+  if(mediaFrame===null||mediaFrame===lastVideoFrame||tracking.busy||now-lastSample+1<tracking.sampleInterval())return null;
   const capture=tracking.push(snapshotCanvas,snapshotContext,now);
   if(capture){lastSample=now;lastVideoFrame=mediaFrame;lastTrackingCapture=capture;}
   return capture;
@@ -92,7 +91,8 @@ function drawSnapshot(source,w,h) {
 function sample() {
   if(!running||document.hidden||!tracking.ready||tracking.busy||video.readyState<2)return;
   const now=performance.now();
-  if(now-lastSample+1<tracking.sampleInterval())return;
+  const mediaFrame=videoFrame(now);
+  if(now-lastSample+1<tracking.sampleInterval()||mediaFrame===null||mediaFrame===lastVideoFrame)return;
   try {drawSnapshot(video,video.videoWidth,video.videoHeight);trackingFrame(now);}
   catch {tracking.failure();}
 }
@@ -115,10 +115,23 @@ async function detect(single) {
     sourceWidth=single?photo.naturalWidth:video.videoWidth;
     sourceHeight=single?photo.naturalHeight:video.videoHeight;
     captured=performance.now();
-    payload.image=snapshot(source,sourceWidth,sourceHeight); payload.format='jpg';
-    if(!single)capture=trackingFrame(performance.now());
+    // Encode the exact most recently submitted pixels, not a newly drawn image
+    // paired with an unrelated/throttled capture ID. Never wait for the worker.
+    if(!single&&tracking.ready&&lastTrackingCapture?.generation===tracking.generation&&captured-lastTrackingCapture.timestamp<350) {
+      capture=lastTrackingCapture;captured=capture.timestamp;
+      payload.image=snapshotCanvas.toDataURL('image/jpeg',.82).split(',')[1];
+    } else {
+      lastTrackingCapture=null;
+      payload.image=snapshot(source,sourceWidth,sourceHeight);
+      if(!single&&tracking.ready&&!tracking.busy) {
+        capture=tracking.push(snapshotCanvas,snapshotContext,captured);
+        if(capture){lastSample=captured;lastVideoFrame=videoFrame(captured);lastTrackingCapture=capture;}
+      }
+    }
+    payload.format='jpg';
   } catch(e) { backoff(); fail(e.message); schedule(); return; }
-  lastCapture=captured;
+  const requestStarted=performance.now();
+  lastCapture=requestStarted;
   pending=true; updateButtons(); clearError(); $('results').setAttribute('aria-busy','true');
   if(single) {status('Asking Jev…','busy');text('stage-note','ANALYZING SELECTED IMAGE');}
   else liveStatus();
@@ -134,7 +147,7 @@ async function detect(single) {
     const now=performance.now();
     actions.accept(data.detections,captured,now,actionGeneration,Number($('confidence').value));
     if(!single) rate.record(now);
-    $('latency').textContent=`${((now-captured)/1000).toFixed(2)} s`;
+    $('latency').textContent=`${((now-requestStarted)/1000).toFixed(2)} s`;
     if(frame.accept(epoch,data.detections,captured,now)) {
       if(!single)tracking.seed(capture,data.detections,Number($('confidence').value));
       if(single) {status('Image analyzed','live');text('stage-note','SNAPSHOT RESULT · EXPIRES 4s AFTER CAPTURE');}

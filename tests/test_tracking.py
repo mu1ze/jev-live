@@ -17,6 +17,43 @@ draw();setInterval(draw,30);navigator.mediaDevices.getUserMedia=async()=>c.captu
 """
 
 class TrackingTests(unittest.TestCase):
+    def test_slow_12hz_recognition_uses_exact_sampled_pixels_not_throttle_slot(self):
+        harness=test_server.HTTPTests()
+        def upstream(req):
+            time.sleep(1.4)
+            return {'answers':{'target_0_visible':{'type':'noul','noul':.96},'target_0':{'type':'box','confidence':.9,'box':dict(left=60/640,right=160/640,top=70/360,bottom=170/360)}}}
+        with harness.running(transport=upstream),sync_playwright() as pw:
+            browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+            try:
+                page=browser.new_page()
+                page.add_init_script(CAMERA.replace('captureStream(30)','captureStream(12)')+"""
+                    window.seedCaptures=[];window.pixelImages={};
+                    const NativeWorker=Worker;
+                    window.Worker=class extends NativeWorker {
+                        postMessage(m,...rest){
+                            if(m.type==='frame'){
+                                const c=document.createElement('canvas');c.width=m.width;c.height=m.height;
+                                c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.pixels),m.width,m.height),0,0);
+                                pixelImages[m.frameId]=c.toDataURL('image/jpeg',.82).split(',')[1];
+                            }
+                            super.postMessage(m,...rest);
+                        }
+                    };
+                """)
+                script=(ROOT/'static/app.js').read_text().replace(
+                    'tracking.seed(capture,data.detections,Number($(\'confidence\').value))',
+                    "(window.seedCaptures.push({capture,image:payload.image}),tracking.seed(capture,data.detections,Number($('confidence').value)))")
+                page.route('**/app.js',lambda route:route.fulfill(body=script,content_type='text/javascript'))
+                page.goto(f'http://127.0.0.1:{harness.port}/')
+                page.locator('#key').fill('fixture-only');page.locator('#labels').fill('water bottle');page.locator('#cadence').select_option('250');page.locator('#start').click()
+                page.wait_for_function('() => seedCaptures.length>=4',timeout=15000)
+                result=page.evaluate("() => seedCaptures.slice(1).map(s=>({hasCapture:!!s.capture,identical:!!s.capture&&pixelImages[s.capture.frameId]===s.image}))")
+                self.assertTrue(all(r['hasCapture'] for r in result),result)
+                self.assertTrue(all(r['identical'] for r in result),result)
+                page.locator('#stop').click();page.wait_for_timeout(1500)
+            finally:
+                browser.close()
+
     def test_12hz_delayed_seed_services_pixels_during_replay(self):
         harness=test_server.HTTPTests()
         with harness.running(),sync_playwright() as pw:
