@@ -17,6 +17,143 @@ draw();setInterval(draw,30);navigator.mediaDevices.getUserMedia=async()=>c.captu
 """
 
 class TrackingTests(unittest.TestCase):
+    def test_slow_semantics_remain_useful_without_live_geometry_and_expire(self):
+        harness=test_server.HTTPTests();positive=True
+        def upstream(req):
+            time.sleep(1.4)
+            return {'answers':{'target_0_visible':{'type':'noul','noul':.96 if positive else .01},'target_0':{'type':'box','confidence':.9,'box':dict(left=.2,right=.8,top=.2,bottom=.8)}}}
+        with harness.running(transport=upstream),sync_playwright() as pw:
+            browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+            try:
+                for loading in (True,False):
+                    with self.subTest(loading=loading):
+                        positive=True
+                        page=browser.new_page()
+                        page.add_init_script("""
+                            const c=document.createElement('canvas');c.width=640;c.height=360;
+                            c.getContext('2d').fillRect(0,0,640,360);
+                            setInterval(()=>c.getContext('2d').fillRect(0,0,640,360),83);
+                            navigator.mediaDevices.getUserMedia=async()=>c.captureStream(12);
+                            window.workers=[];const NativeWorker=Worker;
+                            window.Worker=class extends NativeWorker{constructor(...args){super(...args);workers.push(this)}};
+                        """)
+                        if loading:page.route('**/tracking-worker.js',lambda route:route.fulfill(body="setTimeout(()=>postMessage({type:'ready'}),16000)",content_type='text/javascript'))
+                        page.goto(f'http://127.0.0.1:{harness.port}/')
+                        page.locator('#key').fill('fixture-only');page.locator('#labels').fill('bottle');page.locator('#cadence').select_option('5000');page.locator('#start').click()
+                        page.wait_for_function("() => document.querySelector('#count').textContent==='1'",timeout=5000)
+                        self.assertIn('bottle',page.locator('#results').inner_text())
+                        self.assertIn('Last recognized',page.locator('#results').inner_text())
+                        self.assertEqual(page.locator('#tracked-count').inner_text(),'0')
+                        self.assertEqual(page.locator('.box').count(),0,'old response coordinates must never land on live preview')
+                        page.evaluate("workers[0].dispatchEvent(new ErrorEvent('error'))")
+                        self.assertEqual(page.locator('#count').inner_text(),'1','worker failure must not clear independent semantics')
+                        page.wait_for_function("() => document.querySelector('#age').textContent==='Expired'",timeout=4000)
+                        self.assertEqual(page.locator('#count').inner_text(),'0')
+                        positive=False
+                        page.locator('#cadence').select_option('250')
+                        page.wait_for_function("() => document.querySelector('#results').textContent.includes('No detections above threshold')",timeout=5000)
+                        self.assertEqual(page.locator('#count').inner_text(),'0')
+                        page.locator('#stop').click();page.wait_for_timeout(1500);page.close()
+            finally:
+                browser.close()
+
+    def test_slow_12hz_recognition_uses_exact_sampled_pixels_not_throttle_slot(self):
+        harness=test_server.HTTPTests()
+        def upstream(req):
+            time.sleep(1.4)
+            return {'answers':{'target_0_visible':{'type':'noul','noul':.96},'target_0':{'type':'box','confidence':.9,'box':dict(left=60/640,right=160/640,top=70/360,bottom=170/360)}}}
+        with harness.running(transport=upstream),sync_playwright() as pw:
+            browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+            try:
+                page=browser.new_page()
+                page.add_init_script(CAMERA.replace('captureStream(30)','captureStream(12)')+"""
+                    window.seedCaptures=[];window.pixelImages={};
+                    const NativeWorker=Worker;
+                    window.Worker=class extends NativeWorker {
+                        postMessage(m,...rest){
+                            if(m.type==='frame'){
+                                const c=document.createElement('canvas');c.width=m.width;c.height=m.height;
+                                c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.pixels),m.width,m.height),0,0);
+                                pixelImages[m.frameId]=c.toDataURL('image/jpeg',.82).split(',')[1];
+                            }
+                            super.postMessage(m,...rest);
+                        }
+                    };
+                """)
+                script=(ROOT/'static/app.js').read_text().replace(
+                    'tracking.seed(capture,data.detections,Number($(\'confidence\').value))',
+                    "(window.seedCaptures.push({capture,image:payload.image}),tracking.seed(capture,data.detections,Number($('confidence').value)))")
+                page.route('**/app.js',lambda route:route.fulfill(body=script,content_type='text/javascript'))
+                page.goto(f'http://127.0.0.1:{harness.port}/')
+                page.locator('#key').fill('fixture-only');page.locator('#labels').fill('water bottle');page.locator('#cadence').select_option('250');page.locator('#start').click()
+                page.wait_for_function('() => seedCaptures.length>=4',timeout=15000)
+                result=page.evaluate("() => seedCaptures.slice(1).map(s=>({hasCapture:!!s.capture,identical:!!s.capture&&pixelImages[s.capture.frameId]===s.image}))")
+                self.assertTrue(all(r['hasCapture'] for r in result),result)
+                self.assertTrue(all(r['identical'] for r in result),result)
+                page.locator('#stop').click();page.wait_for_timeout(1500)
+            finally:
+                browser.close()
+
+    def test_12hz_delayed_seed_services_pixels_during_replay(self):
+        harness=test_server.HTTPTests()
+        with harness.running(),sync_playwright() as pw:
+            browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+            try:
+                page=browser.new_page()
+                script=(ROOT/'static/tracker-classic.js').read_text().replace(
+                    'advance(prev,next,tracks) {',
+                    'advance(prev,next,tracks) {if(tracks.length){const end=performance.now()+20;while(performance.now()<end){}}')
+                page.route('**/tracker-classic.js',lambda route:route.fulfill(body=script,content_type='text/javascript'))
+                page.goto(f'http://127.0.0.1:{harness.port}/')
+                result=page.evaluate("""async () => {
+                    const {TrackingClient}=await import('/tracking-client.mjs');
+                    const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+                    const c=new TrackingClient(()=>{});c.start();
+                    try {
+                        while(!c.ready)await sleep(10);
+                        const canvas=document.createElement('canvas');canvas.width=320;canvas.height=320;
+                        const ctx=canvas.getContext('2d'),im=ctx.createImageData(320,320);let s=42;
+                        for(let i=0;i<im.data.length;i+=4){s=(s*1664525+1013904223)>>>0;im.data[i]=s&255;im.data[i+1]=s>>>8&255;im.data[i+2]=s>>>16&255;im.data[i+3]=255}ctx.putImageData(im,0,0);
+                        const push=()=>c.push(canvas,ctx,performance.now());
+                        const first=push();while(c.busy)await sleep(5);
+                        const sampler=setInterval(()=>{if(!c.busy)push()},83);
+                        await sleep(1400);
+                        let seedDone=false,framesDuring=0,seed;
+                        c.worker.addEventListener('message',({data:m})=>{
+                            if(m.type==='seed'){seedDone=true;seed=m;}
+                            else if(m.type==='frame'&&!seedDone)framesDuring++;
+                        });
+                        c.seed(first,[{label:'person',confidence:.9,box:{left:.2,top:.2,right:.8,bottom:.8}}],.7);
+                        const end=performance.now()+4000;
+                        while(!seedDone&&performance.now()<end)await sleep(10);
+                        clearInterval(sampler);
+                        const firstResult={framesDuring,seed,diagnostics:c.diagnostics(),visible:c.current(performance.now()).length};
+                        // Reset while a second replay is suspended: the old owner must
+                        // never resume into disposed gray Mats or publish into a new source.
+                        c.reset();const oldGeneration=c.generation,old=push();
+                        while(c.busy)await sleep(5);
+                        const again=setInterval(()=>{if(!c.busy)push()},83);
+                        await sleep(700);
+                        let obsoleteReplies=0;
+                        c.worker.addEventListener('message',({data:m})=>{if(m.type==='seed'&&m.generation===oldGeneration)obsoleteReplies++});
+                        c.seed(old,[{label:'old',confidence:.9,box:{left:.2,top:.2,right:.8,bottom:.8}}],.7);
+                        await sleep(60);clearInterval(again);c.reset();
+                        const fresh=push();while(c.busy)await sleep(5);
+                        c.seed(fresh,[{label:'new',confidence:.9,box:{left:.2,top:.2,right:.8,bottom:.8}}],.7);
+                        await sleep(250);
+                        firstResult.reset={obsoleteReplies,ready:c.ready,labels:c.current(performance.now()).map(t=>t.label)};
+                        return firstResult;
+                    } finally {c.close()}
+                }""")
+                self.assertGreater(result['framesDuring'],1,'seed replay starved pixel messages')
+                self.assertEqual(len(result['seed']['seedResult']['accepted']),1)
+                self.assertEqual(result['diagnostics']['losses'].get('frame-gap',0),0)
+                self.assertEqual(result['visible'],1)
+                self.assertEqual(result['reset'],dict(obsoleteReplies=0,ready=True,labels=['new']))
+                print('12Hz / 1.4s / slowed real replay:',result,flush=True)
+            finally:
+                browser.close()
+
     def test_delayed_real_worker_hides_stale_tracks_then_recovers(self):
         harness=test_server.HTTPTests()
         with harness.running(),sync_playwright() as pw:

@@ -1,10 +1,10 @@
 # Jev Live
 
-A dependency-free Python HTTP gateway and vanilla browser dashboard combining **Jev recognition with browser-local pixel tracking**. Jev 1.14.0 localizes requested targets; a dedicated OpenCV worker follows measured movement between responses. No simulated detections are shipped in the app. Test fixtures exist only under `tests/`.
+A dependency-free Python HTTP gateway and vanilla browser dashboard with two exclusive workflows: **Detection / Tracking** and **Actions**. Jev 1.14.0 recognizes requested targets; only Detection / Tracking uses a dedicated OpenCV worker to follow measured movement between responses. No simulated detections are shipped in the app. Test fixtures exist only under `tests/`.
 
 ## Run
 
-Requires Python 3.10+ and a current browser. The gateway has no pip/npm runtime dependencies. A pinned, same-origin OpenCV 4.13.0 browser runtime is included with its license and provenance; it loads only after Start camera.
+Requires Python 3.10+ and a current browser. The gateway has no pip/npm runtime dependencies. A pinned, same-origin OpenCV 4.13.0 browser runtime is included with its license and provenance; it loads only when a camera is running in Detection / Tracking, never in Actions.
 
 ```sh
 git clone https://github.com/mu1ze/jev-live.git
@@ -55,6 +55,36 @@ All POSTs require an exact matching `Origin`; no CORS is enabled. Direct local H
 
 ## Behavior and billing
 
+### One app, two exclusive workflows
+
+Use the top-level **Workflow** selector (`#workflow-mode`):
+
+- **Detection / Tracking** (`tracking`, the default) retains detection, measured
+  tracking, geometry TTLs, overlays and local diagnostics. Visual Action rules
+  never execute, even if their opt-in checkbox was retained from Actions.
+- **Actions** (`actions`) uses image recognition only. Native camera preview,
+  shared targets, confidence, cadence, measured recognition rate and bounded
+  last-capture identifiers remain. Configure the visible action editor and
+  explicitly enable actions. No tracking worker/OpenCV download, pixel reads,
+  sampling timer/frame callbacks, gray history, seeds or box overlays run here.
+  Each serial request snapshots the native, unfiltered video directly, with its
+  own capture timestamp. Still uploads recognize without geometry overlays.
+- Switching while running retains the same camera stream, terminates the old
+  worker and cancels sampling, clears geometry and action effects, and invalidates
+  old reply generations. One already-sent request still owns the serial slot;
+  the new workflow schedules after it drains. Returning to tracking starts one
+  fresh worker/sampler with no old tracks. Rules and action opt-in persist only
+  in this tab; leaving Actions clears effects without changing that opt-in.
+- Switching while camera permission is pending cancels that start. Click Start
+  camera again; any late permission result has its tracks stopped. Stop, hidden
+  tabs, target/source/confidence and action-setting resets keep their existing
+  freshness and effect-reset contracts. A failed playback startup releases the
+  retained stream even if the workflow changed during `video.play()`.
+
+The tracking details below apply only to Detection / Tracking. Both workflows
+retain one request in flight, cadence/backoff, capture-time semantic freshness
+and the same authenticated gateway; there are no separate routes or apps.
+
 - Smooth native video preview runs independently of requests. Detection does **not** run at video frame rate.
 - Camera boxes use unique track IDs and measured pixel motion, not coordinate interpolation. Local sampling adapts to measured worker turnaround with 35% headroom: a 33ms floor (about 30 Hz when source/CPU permit) and 160ms scheduling ceiling, independently of serial Jev requests. One worker frame is in flight; no pixels queue behind it, and the next submission reads the latest image. Tracked boxes survive weak/missing Jev results only while current visual evidence supports them. Snapshot-only fallback is explicitly labeled if tracking cannot initialize; still-image analysis remains snapshot-only.
 - Changed-only DOM updates, stable-width telemetry and one reusable capture canvas remain. The earlier eight-result snapshot-rendering benchmark (8/7 box additions/removals reduced to 1/0) describes the snapshot architecture, not a performance or accuracy claim for tracking.
@@ -66,6 +96,90 @@ All POSTs require an exact matching `Origin`; no CORS is enabled. Direct local H
 - All boxes use `object-fit: contain` letterbox-aware geometry. Camera display merges solid measured tracks with dashed **recognition only · not tracking** boxes for labels without a track, strictly younger than **350 ms from semantic pixel capture** (including encoding/network time). Same-label snapshots never duplicate tracks. When a supported track disappears, snapshots from the same or older capture cannot restore it; only a newer semantic capture may show recognition-only geometry. Slow recognition may therefore produce no snapshot boxes, intentionally. Still-image snapshot boxes retain their **4-second capture TTL**, as do semantic tracking seeds. Tracking seeds initialize at the captured pixels and replay retained frames to the present; expired/unavailable captures are rejected instead of pasted onto the current video. Live visual tracks require semantic revalidation within **10 seconds**, lose immediately when pixel evidence fails, and clear on frame gaps over 200 ms or watchdog stalls. No velocity extrapolation or cosmetic box animation is used.
 - Stop/restart, target edits, key edits, file changes, hidden tabs and worker errors clear/invalidate tracks. Epoch IDs prevent late responses from reviving stale overlays. Transient Jev request errors may preserve a currently supported visual track only until bounded semantic expiry. Editing targets while camera permission is pending cancels that pending start.
 - Stop prevents new requests, but **cannot revoke a frame already sent or cancel billing for a request already being processed**. A pending request is allowed to settle before another is sent, including across restart.
+
+## Visual Actions (first version)
+
+**Off by default, available only in the Actions workflow.** Select **Actions** in
+Workflow, then in the Visual Actions panel add a preset or create a rule, add
+its **exact, case-sensitive label** to Choose your targets, then turn on **Enable
+actions** and Start camera. Bottle adds an underwater/cool display filter, wallet
+a celebratory green money glow, and lighter a warm glow. Presets add rules only;
+they never replace targets, start a camera, or change your update rate. An
+unconfigured target is explicitly marked. Reapplying a preset does not duplicate
+or overwrite an edited rule. Edit/Delete and a custom plain-text card are supported.
+
+- At most **12 rules**, labels up to 80 characters and card messages up to 240.
+  The earliest active filter in rule-list order wins; all active text cards can
+  coexist. Messages use `textContent`, never HTML. Filters are static CSS on the
+  displayed native video/photo only—not the stage, boxes, cards or inference
+  canvas. The unfiltered source and existing contain/letterbox geometry remain.
+- Only **successful semantic recognition** can trigger, not DOM boxes or worker
+  tracks. Two successive fresh confident exact-label captures confirm an appearance.
+  The confidence slider applies (minimum 70%). Duplicates, reordered/future captures
+  and replies aged **2,500 ms or more from capture** are ignored; successful capture
+  gaps at that boundary restart confirmation/absence sequences. Repeated positives
+  during one appearance never repeat a toggle or activation sound.
+- Choose **Activation mode** in each rule's editor; its mode is also listed per rule:
+  - **Toggle (default for new rules, presets and legacy objects with no mode):**
+    confirmation flips the latched effect ON. Remove the target until **three
+    distinct successful negative captures span at least 2,000 ms of capture time**;
+    this rearms without changing the effect. Two new positive captures then flip
+    it OFF. Repeat removal/return to flip it again.
+  - **While present:** confirmation activates. The same three-negative/2-second
+    evidence clears the effect and rearms. Brief misses do not flicker.
+- **No render-clock effect expiry.** Silence, errors, tracking loss and stale replies
+  do not prove absence or switch effects off. With no fresh action observations,
+  badges show **scanning paused / uncertain (not absence)** independently of the
+  latched ON/OFF state. At serial 1.4-second latency effects stay stable. Absence
+  takes at least 2 capture seconds plus response latency (and enough samples).
+  Use **1 Hz or faster** and replies younger than 2.5 seconds; economy 0.2 Hz cannot
+  confirm or rearm. Stop/reset is always available when recognition pauses.
+- Read the **target identifiers beside the preview**, even with no action rule or
+  pixel tracking: exact labels and confirmed/recognized **last capture** age, never
+  a claimed current location. Semantic-only positive badges expire within the
+  existing **4-second capture bound**; independent rule ON/OFF/mode/armed badges
+  remain. Nodes are reconciled using safe text, with readable wrapping on mobile.
+  Live geometry still expires at **350 ms**; no stale boxes are extended.
+- Source changes, Stop, hidden tabs, target/confidence edits, master toggle,
+  rule edits/deletion and **Reset active effects** clear ALL latched/transient state and audio.
+  Action generations also reject captures taken before an enable/configuration
+  change, without resetting the independent camera semantics. Starting an edit
+  clears effects immediately; subsequent fresh recognition can rearm unchanged
+  saved rules until a changed rule is saved. Each still-image Analyze resets the
+  source state: a single still-image request intentionally cannot activate rules.
+- Sounds require **both** the rule's Chime option and the explicit **Allow short
+  sounds on this device** checkbox gesture. No AudioContext is created on load.
+  One low-volume 160 ms sine chime is allowed at a time, with no queued playback;
+  a delayed audio-resume promise cannot play after reset/disable/Stop/hidden.
+  Unsupported WebAudio leaves visuals working. Browser/OS audio policy still
+  applies; no audible-device test is claimed.
+- The visible local event log keeps the latest **40 timestamped activation/clear
+  events**, with a Clear log button. Rule changes/Stop do not delete history.
+  Rules, permissions and history are **in-memory for this tab only**, not persisted.
+  No frames, credentials, raw provider replies, telemetry, webhooks or integrations
+  are saved/uploaded by actions. Reload returns everything to off/empty.
+
+Architecture: `static/visual-actions.mjs` is a pure deterministic-clock state
+machine; `action-view.mjs` owns the opt-in editor, display and bounded history;
+`action-audio.mjs` is a gesture-gated bounded WebAudio adapter. `app.js` feeds the
+engine only successful same-source semantic responses with capture timestamps
+and action-generation tokens. The gateway change only allowlists those three
+same-origin modules; auth, CSP, worker confinement and the default serial 4 Hz
+inference/tracking contracts are unchanged.
+
+Focused fixture checks (no provider or credentials):
+
+```sh
+INSTABOX_HEADLESS=1 PYTHONPATH=tests /data/workspace/jev-live/.venv-test/bin/python -m unittest test_visual_actions -v
+node --test tests/visual-actions.test.mjs tests/action-audio.test.mjs
+```
+
+UI verification selectors: `#actions-enabled`, `[data-preset="bottle"]`
+(and wallet/lighter), `#action-rules > li[data-rule-id]` with Edit/Delete buttons; `#rule-label`,
+`#rule-kind` (`cool`, `warm`, `money`, `card`), `#rule-text`, `#rule-sound`,
+`#rule-save`, `#rule-cancel`, `#actions-sound`, `#actions-state`,
+`#video[data-action-filter="cool"]`, `#action-cards`, `#action-events > li`,
+`#reset-actions`, `#clear-action-events`.
 
 ## Expanded target capacity
 

@@ -38,7 +38,7 @@ export class TrackingClient {
             const elapsed=Math.max(0,now-this.busySince);
             this.turnaround=this.turnaround?this.turnaround*.8+elapsed*.2:elapsed;
             this.processingMs=Number.isFinite(m.processingMs)?Math.max(0,Math.min(10000,m.processingMs)):0;
-          } else this.replayMs=Number.isFinite(m.seedResult?.replayMs)?Math.max(0,Math.min(10000,m.seedResult.replayMs)):0;
+          } else {this.seeding=false;this.replayMs=Number.isFinite(m.seedResult?.replayMs)?Math.max(0,Math.min(10000,m.seedResult.replayMs)):0;}
           this.workerStats=m.diagnostics||this.workerStats;
           this.workerStats=this.diagnostics(now); // discard all non-allowlisted fields immediately
           // Loss time is measured capture time, never semantic response arrival.
@@ -61,7 +61,7 @@ export class TrackingClient {
     return category+line;
   }
   failure(code='frame-capture-error',detail='') {this.close();this.failureCode=code;this.failureDetail=detail;this.state=`tracker unavailable · snapshot fallback · ${code}${detail?' · '+detail:''}`;this.onchange('failure');}
-  reset() {this.clearDiagnostics();this.generation++;this.tracks=[];this.lossCutoffs.clear();this.busy=false;this.lastMeasured=0;this.worker?.postMessage({type:'reset'});this.onchange();}
+  reset() {this.clearDiagnostics();this.generation++;this.tracks=[];this.lossCutoffs.clear();this.busy=false;this.seeding=false;this.lastMeasured=0;this.worker?.postMessage({type:'reset'});this.onchange();}
   close() {clearTimeout(this.loadTimer);this.worker?.terminate();this.worker=null;this.ready=false;this.reset();}
   push(canvas,context,timestamp) {
     if(!this.ready||this.busy)return null;
@@ -80,6 +80,8 @@ export class TrackingClient {
     if(!this.ready){this.reject('worker-not-ready');return;}
     if(performance.now()-capture.timestamp>=4000){this.reject('capture-too-old');return;}
     const seeds=detections.filter(d=>d.confidence>=threshold).map(d=>({label:d.label,confidence:d.confidence,box:[d.box.left,d.box.top,d.box.right-d.box.left,d.box.bottom-d.box.top]}));
+    if(this.seeding){this.reject('seed-busy');return;}
+    this.seeding=true;
     this.worker.postMessage({type:'seed',...capture,detections:seeds});
   }
   current(now) {
