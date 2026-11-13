@@ -42,6 +42,71 @@ class VisualActionBrowserTests(unittest.TestCase):
         # serial request immediately, so aria-busy=false may be too brief to poll.
         self.page.evaluate('() => new Promise(resolve => setTimeout(resolve, 0))')
 
+    def test_running_workflow_transitions_drain_and_resume_measured_tracking(self):
+        from test_tracking import CAMERA
+        p=self.page;p.unroute('**/tracking-worker.js')
+        p.add_init_script(CAMERA[CAMERA.index('window.dx'):]+"""
+            window.callbacks=new Set();window.samplers=new Set();
+            const cb=HTMLVideoElement.prototype.requestVideoFrameCallback,cancel=HTMLVideoElement.prototype.cancelVideoFrameCallback;
+            HTMLVideoElement.prototype.requestVideoFrameCallback=function(fn){let id=cb.call(this,(...a)=>{callbacks.delete(id);fn(...a)});callbacks.add(id);return id};
+            HTMLVideoElement.prototype.cancelVideoFrameCallback=function(id){callbacks.delete(id);return cancel.call(this,id)};
+            const interval=window.setInterval,clear=window.clearInterval;
+            window.setInterval=(fn,ms,...a)=>{const id=interval(fn,ms,...a);if(ms===20)samplers.add(id);return id};
+            window.clearInterval=id=>{samplers.delete(id);return clear(id)};
+            window.workers=[];window.framePosts=0;window.seedPosts=0;
+            const NativeWorker=Worker;
+            window.Worker=class extends NativeWorker {
+                constructor(...a){super(...a);this.active=true;workers.push(this)}
+                terminate(){this.active=false;return super.terminate()}
+                postMessage(m,...a){if(m.type==='frame')framePosts++;if(m.type==='seed')seedPosts++;return super.postMessage(m,...a)}
+            };
+        """)
+        p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
+        p.evaluate("""() => {
+            window.requests={active:0,max:0,starts:0};const fetch=window.fetch;
+            window.fetch=(url,...a)=>{
+                if(!String(url).endsWith('api/detect'))return fetch(url,...a);
+                requests.active++;requests.starts++;requests.max=Math.max(requests.max,requests.active);
+                return fetch(url,...a).finally(()=>requests.active--);
+            };
+        }""")
+        p.locator('#start').click();p.wait_for_function('() => !!window.reply')
+        p.wait_for_function('() => framePosts>=2')
+        p.evaluate('window.cameraSource=document.querySelector("#video").srcObject')
+        starts=p.evaluate('requests.starts')
+        p.locator('#workflow-mode').select_option('actions')
+        self.assertEqual(p.evaluate('workers.filter(w=>w.active).length'),0,'leaving tracking must terminate worker')
+        self.assertEqual(p.evaluate('[callbacks.size,samplers.size]'),[0,0])
+        posts=p.evaluate('framePosts');p.wait_for_timeout(250)
+        self.assertEqual(p.evaluate('framePosts'),posts,'no sampling after transition')
+        self.assertEqual(p.evaluate('requests.starts'),starts,'old request owns serial slot')
+        self.answer();self.assertEqual(p.locator('#count').inner_text(),'0','old workflow reply rejected')
+        p.locator('[data-preset="bottle"]').click();p.locator('#actions-enabled').check()
+        self.answer();self.answer();self.answer()
+        self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool')
+        p.wait_for_function('() => !!window.reply');starts=p.evaluate('requests.starts')
+        p.locator('#workflow-mode').select_option('tracking')
+        self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None)
+        self.assertEqual(p.locator('.box').count(),0,'no prior geometry on return')
+        p.wait_for_function('(previous) => workers.filter(w=>w.active).length===1 && framePosts>previous+2',arg=posts)
+        self.assertEqual(p.evaluate('[callbacks.size,samplers.size]'),[1,1],'exactly one resumed sampling loop')
+        self.assertEqual(p.evaluate('requests.starts'),starts)
+        self.answer();self.assertEqual(p.locator('#count').inner_text(),'0')
+        self.answer()
+        p.wait_for_function("() => document.querySelectorAll('.box[data-mode=tracked]').length>0",timeout=10000)
+        self.assertTrue(p.evaluate('document.querySelector("#video").srcObject===cameraSource'))
+        self.assertGreater(p.evaluate('seedPosts'),0)
+        # Repeat return to Actions while worker is genuinely tracking.
+        p.locator('#workflow-mode').select_option('actions')
+        self.assertEqual(p.evaluate('workers.filter(w=>w.active).length'),0)
+        self.assertEqual(p.locator('.box').count(),0)
+        posts=p.evaluate('framePosts');p.wait_for_timeout(350);self.assertEqual(p.evaluate('framePosts'),posts)
+        self.assertTrue(p.evaluate('document.querySelector("#video").srcObject===cameraSource'))
+        self.assertEqual(p.evaluate('requests.max'),1)
+        self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None)
+        self.assertTrue(p.locator('#actions-enabled').is_checked())
+        self.assertEqual(p.locator('#action-rules li').count(),1)
+
     def test_actions_cold_start_has_only_serial_video_snapshots(self):
         p=self.page
         p.evaluate("""async () => {

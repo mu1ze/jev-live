@@ -29,7 +29,7 @@ function watchVideo() {
   presentedFrame=0;qualityFrame=-1;qualityChanged=0;
   if(typeof video.requestVideoFrameCallback!=='function')return;
   const next=()=>{
-    if(!running||source!==stream)return;
+    if(actionMode()||!running||source!==stream)return;
     presentedFrame++;sample();
     videoCallback=video.requestVideoFrameCallback(next);
   };
@@ -75,10 +75,17 @@ function credentials() {
   return {key:$('key').value.trim(),labels};
 }
 function updateButtons() { $('start').disabled=running; $('analyze').disabled=!uploaded || pending || running; }
-function stop() {
+function stopTracking() {
   if(videoCallback!==null)video.cancelVideoFrameCallback?.(videoCallback);
   videoCallback=null;
-  running=false; clearInterval(sampleTimer);sampleTimer=null;tracking.close();reset(); $('results').setAttribute('aria-busy','false');
+  clearInterval(sampleTimer);sampleTimer=null;tracking.close();
+}
+function startTracking() {
+  if(actionMode()||!running||!stream||sampleTimer!==null)return;
+  watchVideo();tracking.start();sampleTimer=setInterval(sample,20);
+}
+function stop() {
+  running=false;stopTracking();reset(); $('results').setAttribute('aria-busy','false');
   if(stream) stream.getTracks().forEach(track=>track.stop());
   stream=null; video.srcObject=null;
   $('empty').hidden=!!uploaded; video.hidden=true; photo.hidden=!uploaded;
@@ -191,7 +198,7 @@ async function start() {
     await video.play();
     if(epoch!==frame.epoch || !running) return;
     $('source-label').textContent='LIVE CAMERA'; liveStatus();
-    if(!actionMode()){watchVideo();tracking.start();sampleTimer=setInterval(sample,20);}
+    startTracking();
     stream.getVideoTracks()[0].addEventListener('ended',()=>{if(running){stop();fail('Camera disconnected. Reconnect and Start again.');}});
     detect(false);
   } catch(e) {
@@ -269,7 +276,11 @@ function render() {
   }
 }
 $('tracking-details').parentElement.addEventListener('toggle',()=>render());
-$('workflow-mode').addEventListener('change',()=>{reset();workflowUI();if(running&&!pending)schedule();render();});
+$('workflow-mode').addEventListener('change',()=>{
+  stopTracking();reset();workflowUI();
+  if(running&&stream){startTracking();if(!pending)schedule();}
+  render();
+});
 workflowUI();
 $('start').addEventListener('click',start);
 $('stop').addEventListener('click',stop);
