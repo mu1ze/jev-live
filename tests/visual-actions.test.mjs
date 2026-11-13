@@ -6,6 +6,12 @@ const mod=existsSync(path)?await import(path):{};
 const rule={id:'bottle',label:'bottle',kind:'cool',text:'',sound:false};
 const positive=[{label:'bottle',confidence:.9}];
 const engine=()=>new mod.VisualActions([rule]);
+test('rule validation bounds local text, exact labels and allowed actions',()=>{
+  assert.equal(typeof mod.validRule,'function');
+  assert.equal(mod.validRule(rule),true);
+  assert.equal(mod.validRule({...rule,kind:'card',text:'<img src=x onerror=alert(1)>'}),true,'plain text may contain angle brackets');
+  for(const bad of [{...rule,label:'bottle, wallet'},{...rule,label:' bottle'},{...rule,kind:'webhook'},{...rule,text:'x'.repeat(241)},{...rule,sound:'yes'},{...rule,label:'x'.repeat(81)},{...rule,kind:'card',text:'   '}])assert.equal(mod.validRule(bad),false);
+});
 test('freshness is capture-bounded at 2500ms even without negatives; duplicate and future evidence rejected',()=>{
   const e=engine();e.accept(positive,0,0);
   assert.equal(e.accept(positive,0,100).active.length,0,'duplicate is not a second success');

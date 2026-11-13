@@ -1,3 +1,10 @@
+export function validRule(rule) {
+  return !!rule&&typeof rule.id==='string'&&rule.id.length>0&&rule.id.length<=80&&
+    typeof rule.label==='string'&&rule.label===rule.label.trim()&&/^[\p{L}\p{N}_][\p{L}\p{N}_ .'()/-]{0,79}$/u.test(rule.label)&&
+    ['cool','warm','money','card'].includes(rule.kind)&&typeof rule.sound==='boolean'&&
+    typeof rule.text==='string'&&rule.text.length<=240&&(rule.kind!=='card'||rule.text.trim().length>0);
+}
+
 // Pure semantic state, independent of preview geometry, workers and wall clock.
 export class VisualActions {
   constructor(rules=[]) { this.rules=rules; this.reset(); }

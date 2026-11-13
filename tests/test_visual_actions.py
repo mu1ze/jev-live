@@ -35,6 +35,42 @@ class VisualActionBrowserTests(unittest.TestCase):
         self.page.evaluate('args=>window.reply(...args)',[[{'label':label,'confidence':confidence,'box':dict(left=.1,right=.6,top=.2,bottom=.8)} for label in labels],status])
         self.page.wait_for_function("() => document.querySelector('#results').getAttribute('aria-busy')==='false'")
 
+    def test_rule_editor_plain_text_cards_and_safe_presets(self):
+        p=self.page
+        self.assertEqual(p.locator('#rule-form').count(),1,'accessible rule editor exists')
+        for preset in ('bottle','wallet','lighter','bottle'):
+            p.locator(f'[data-preset="{preset}"]').click()
+        self.assertEqual(p.locator('#action-rules li').count(),3,'preset buttons are idempotent')
+        self.assertEqual(p.locator('#labels').input_value(),'coffee mug, person')
+        p.locator('#labels').fill('bottle, wallet, lighter')
+        p.locator('#rule-label').fill('wallet')
+        p.locator('#rule-kind').select_option('card')
+        literal='<img src=x onerror=alert(1)> wallet found'
+        p.locator('#rule-text').fill(literal);p.locator('#rule-save').click()
+        self.assertEqual(p.locator('#action-rules li').count(),4)
+        p.locator('#actions-enabled').check();p.locator('#start').click()
+        self.answer(('bottle','wallet','lighter'));self.answer(('bottle','wallet','lighter'))
+        p.wait_for_function("() => document.querySelector('#action-cards')?.textContent.includes('wallet found')")
+        self.assertEqual(p.locator('#action-cards').inner_text(),literal)
+        self.assertEqual(p.locator('#action-cards img').count(),0,'card text is never HTML')
+        self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool','first rule wins')
+        self.assertEqual(p.locator('#action-cards').evaluate('n=>getComputedStyle(n).filter'),'none')
+        p.wait_for_function('() => !!window.reply')
+        p.locator('#action-rules li').last.get_by_role('button',name='Edit').click()
+        p.locator('#rule-text').fill('Edited local card');p.locator('#rule-save').click()
+        self.assertEqual(p.locator('#action-cards').inner_text(),'','editing resets every active effect immediately')
+        self.answer(('wallet',)) # pre-edit capture ignored
+        self.answer(('wallet',));self.assertEqual(p.locator('#action-cards').inner_text(),'')
+        self.answer(('wallet',))
+        p.wait_for_function("() => document.querySelector('#action-cards').textContent==='Edited local card'")
+        p.locator('#action-rules li').last.get_by_role('button',name='Delete').click()
+        self.assertEqual(p.locator('#action-cards').inner_text(),'')
+        self.assertEqual(p.locator('#action-rules li').count(),3)
+        p.set_viewport_size({'width':390,'height':844})
+        self.assertTrue(p.evaluate('document.documentElement.scrollWidth<=innerWidth'))
+        p.emulate_media(reduced_motion='reduce')
+        self.assertEqual(p.locator('#action-cards').evaluate('n=>getComputedStyle(n).animationName'),'none')
+
     def test_opt_in_filter_uses_only_fresh_semantics_and_survives_box_expiry(self):
         p=self.page
         self.assertEqual(p.locator('#actions-enabled').count(),1,'Visual Actions opt-in control exists')
