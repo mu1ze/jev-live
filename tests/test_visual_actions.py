@@ -140,7 +140,7 @@ class VisualActionBrowserTests(unittest.TestCase):
 
     def test_lifecycle_clears_effects_and_rejects_old_replies(self):
         p=self.page
-        for change in ('hidden','targets','disable','stop','source'):
+        for change in ('hidden','targets','confidence','disable','stop','source'):
             with self.subTest(change=change):
                 p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
                 p.locator('[data-preset="bottle"]').click();p.locator('#actions-enabled').check();p.locator('#start').click()
@@ -149,6 +149,7 @@ class VisualActionBrowserTests(unittest.TestCase):
                 p.wait_for_function('() => !!window.reply')
                 if change=='hidden':p.evaluate("window.fixtureHidden=true;document.dispatchEvent(new Event('visibilitychange'))")
                 elif change=='targets':p.locator('#labels').fill('wallet')
+                elif change=='confidence':p.locator('#confidence').fill('0.8')
                 elif change=='disable':p.locator('#actions-enabled').uncheck()
                 elif change=='stop':p.locator('#stop').click()
                 else:
@@ -158,6 +159,11 @@ class VisualActionBrowserTests(unittest.TestCase):
                 self.answer()
                 self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None,'late old-source reply cannot activate')
                 self.assertEqual(p.locator('#photo').get_attribute('data-action-filter'),None)
+                if change=='confidence':
+                    self.answer()
+                    self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None,'old-threshold capture cannot contribute to the fresh streak')
+                    self.answer()
+                    p.wait_for_function("() => document.querySelector('#video').dataset.actionFilter==='cool'")
                 p.locator('#stop').click()
 
     def test_optional_sound_is_gesture_gated_and_cancelled_on_stop(self):
