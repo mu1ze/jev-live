@@ -1,10 +1,10 @@
 # Jev Live
 
-A dependency-free Python HTTP gateway and vanilla browser dashboard combining **Jev recognition with browser-local pixel tracking**. Jev 1.14.0 localizes requested targets; a dedicated OpenCV worker follows measured movement between responses. No simulated detections are shipped in the app. Test fixtures exist only under `tests/`.
+A dependency-free Python HTTP gateway and vanilla browser dashboard with two exclusive workflows: **Detection / Tracking** and **Actions**. Jev 1.14.0 recognizes requested targets; only Detection / Tracking uses a dedicated OpenCV worker to follow measured movement between responses. No simulated detections are shipped in the app. Test fixtures exist only under `tests/`.
 
 ## Run
 
-Requires Python 3.10+ and a current browser. The gateway has no pip/npm runtime dependencies. A pinned, same-origin OpenCV 4.13.0 browser runtime is included with its license and provenance; it loads only after Start camera.
+Requires Python 3.10+ and a current browser. The gateway has no pip/npm runtime dependencies. A pinned, same-origin OpenCV 4.13.0 browser runtime is included with its license and provenance; it loads only when a camera is running in Detection / Tracking, never in Actions.
 
 ```sh
 git clone https://github.com/mu1ze/jev-live.git
@@ -55,6 +55,36 @@ All POSTs require an exact matching `Origin`; no CORS is enabled. Direct local H
 
 ## Behavior and billing
 
+### One app, two exclusive workflows
+
+Use the top-level **Workflow** selector (`#workflow-mode`):
+
+- **Detection / Tracking** (`tracking`, the default) retains detection, measured
+  tracking, geometry TTLs, overlays and local diagnostics. Visual Action rules
+  never execute, even if their opt-in checkbox was retained from Actions.
+- **Actions** (`actions`) uses image recognition only. Native camera preview,
+  shared targets, confidence, cadence, measured recognition rate and bounded
+  last-capture identifiers remain. Configure the visible action editor and
+  explicitly enable actions. No tracking worker/OpenCV download, pixel reads,
+  sampling timer/frame callbacks, gray history, seeds or box overlays run here.
+  Each serial request snapshots the native, unfiltered video directly, with its
+  own capture timestamp. Still uploads recognize without geometry overlays.
+- Switching while running retains the same camera stream, terminates the old
+  worker and cancels sampling, clears geometry and action effects, and invalidates
+  old reply generations. One already-sent request still owns the serial slot;
+  the new workflow schedules after it drains. Returning to tracking starts one
+  fresh worker/sampler with no old tracks. Rules and action opt-in persist only
+  in this tab; leaving Actions clears effects without changing that opt-in.
+- Switching while camera permission is pending cancels that start. Click Start
+  camera again; any late permission result has its tracks stopped. Stop, hidden
+  tabs, target/source/confidence and action-setting resets keep their existing
+  freshness and effect-reset contracts. A failed playback startup releases the
+  retained stream even if the workflow changed during `video.play()`.
+
+The tracking details below apply only to Detection / Tracking. Both workflows
+retain one request in flight, cadence/backoff, capture-time semantic freshness
+and the same authenticated gateway; there are no separate routes or apps.
+
 - Smooth native video preview runs independently of requests. Detection does **not** run at video frame rate.
 - Camera boxes use unique track IDs and measured pixel motion, not coordinate interpolation. Local sampling adapts to measured worker turnaround with 35% headroom: a 33ms floor (about 30 Hz when source/CPU permit) and 160ms scheduling ceiling, independently of serial Jev requests. One worker frame is in flight; no pixels queue behind it, and the next submission reads the latest image. Tracked boxes survive weak/missing Jev results only while current visual evidence supports them. Snapshot-only fallback is explicitly labeled if tracking cannot initialize; still-image analysis remains snapshot-only.
 - Changed-only DOM updates, stable-width telemetry and one reusable capture canvas remain. The earlier eight-result snapshot-rendering benchmark (8/7 box additions/removals reduced to 1/0) describes the snapshot architecture, not a performance or accuracy claim for tracking.
@@ -69,7 +99,8 @@ All POSTs require an exact matching `Origin`; no CORS is enabled. Direct local H
 
 ## Visual Actions (first version)
 
-**Off by default.** In the Visual Actions panel, add a preset or create a rule, add
+**Off by default, available only in the Actions workflow.** Select **Actions** in
+Workflow, then in the Visual Actions panel add a preset or create a rule, add
 its **exact, case-sensitive label** to Choose your targets, then turn on **Enable
 actions** and Start camera. Bottle adds an underwater/cool display filter, wallet
 a celebratory green money glow, and lighter a warm glow. Presets add rules only;

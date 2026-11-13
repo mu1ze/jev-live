@@ -216,6 +216,16 @@ class VisualActionBrowserTests(unittest.TestCase):
 
     def test_both_modes_capture_confirmed_absence_and_return_cycles(self):
         p=self.page
+        p.add_init_script("""
+            window.cycleCost={workers:0,reads:0,callbacks:0,samplers:0};
+            const NativeWorker=Worker;window.Worker=class extends NativeWorker{constructor(...a){super(...a);cycleCost.workers++}};
+            const read=CanvasRenderingContext2D.prototype.getImageData;
+            CanvasRenderingContext2D.prototype.getImageData=function(...a){cycleCost.reads++;return read.apply(this,a)};
+            const cb=HTMLVideoElement.prototype.requestVideoFrameCallback;
+            HTMLVideoElement.prototype.requestVideoFrameCallback=function(...a){cycleCost.callbacks++;return cb.apply(this,a)};
+            const interval=window.setInterval;window.setInterval=(fn,ms,...a)=>{if(ms===20)cycleCost.samplers++;return interval(fn,ms,...a)};
+        """)
+        requests=[];p.on('request',lambda req:requests.append(req.url))
         for mode in ('toggle','present'):
             with self.subTest(mode=mode):
                 p.reload();p.locator('#workflow-mode').select_option('actions');p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
@@ -237,6 +247,9 @@ class VisualActionBrowserTests(unittest.TestCase):
                 self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None if mode=='toggle' else 'cool')
                 self.assertTrue(p.evaluate("window.badgeNode===document.querySelector('#target-identifiers p')"),'identifier nodes are reconciled, not replaced')
                 self.assertEqual(p.locator('#action-events li').count(),2 if mode=='toggle' else 3)
+                self.assertEqual(p.evaluate('cycleCost'),dict(workers=0,reads=0,callbacks=0,samplers=0))
+                self.assertFalse(any(any(asset in url for asset in ('tracking-worker','opencv.js','tracker-classic')) for url in requests))
+                self.assertEqual(p.locator('.box').count(),0)
                 p.locator('#stop').click()
                 if p.evaluate('!!window.reply'):p.evaluate('window.reply([])')
 

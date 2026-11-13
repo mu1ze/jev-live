@@ -1,5 +1,53 @@
 # Observed test-first checkpoints
 
+## Exclusive workflow modes — starting at `6ed2427`
+
+One existing app and URL, with top-level `#workflow-mode`: `tracking` (default,
+Detection / Tracking) and `actions` (recognition only). No routes, server/auth,
+CSP, engine timing contracts, 350ms geometry TTL or 4s semantic TTL changed.
+
+Observed vertical RED → GREEN milestones, each followed by the complete Python
+ResourceWarning-as-error and Node suites before its implementation commit:
+
+| Slice | Observed RED | GREEN / commit |
+| --- | --- | --- |
+| Workflow UI + effect gate | Browser could not find `#workflow-mode` (expected missing-feature timeout). | Default tracking, hidden action editor, visible diagnostics; retained opt-in cannot execute effects. `241b6bb`; Python 62 / Node 28. |
+| Recognition-only Actions | Cold Actions rendered one box (`1 != 0`); worker/sampler work was still present. | No worker/runtime requests, getImageData, RVFC sampling, 20ms sampler, tracker current/seed/diagnostics calls; four positives activate with direct-video capture timestamps. `c3b475d`; Python 63 / Node 28. |
+| Running transitions | Leaving tracking left one active worker (`1 != 0`). | Same camera, terminated worker, canceled callback/timer, invalidated replies, one outstanding request; one fresh worker and actual measured textured-object tracks on return. `b88700b`; Python 64 / Node 28. |
+| Camera startup races | Permission switch stranded disabled Start; a switch during play lost disconnect cleanup and source label; late play rejection stranded the retained stream. Cold Actions also still claimed it could track visually. | Pending permission canceled with late tracks stopped; retained stream identity protects play/disconnect/failure cleanup; workflow-appropriate empty results. `87d4da9`; Python 68 / Node 28. |
+
+The existing action browser suite now explicitly selects Actions after every
+reload. Both Toggle and While present retain the slow 1400ms positives,
+three-negative absence/return cycles, stable identifiers, expiry/gap limits,
+opt-in/audio generations, safe text cards and full hidden/target/confidence/
+disable/Stop/source/edit/reset matrix. Workflow round trips were added to that
+matrix. Both complete action cycles now also measure **zero** worker creation,
+getImageData, frame callbacks and sampler timers, with no runtime fetch or box.
+Actions still uploads recognize and show semantic results without live geometry.
+Mobile 390px overflow and tracking-control/editor visibility remain checked.
+
+Final commands (local fixtures only, no provider/deployment/credentials):
+
+```sh
+INSTABOX_HEADLESS=1 /data/workspace/jev-live/.venv-test/bin/python -W error::ResourceWarning -m unittest discover -s tests -q
+# 68 passed, no skips; 297.789s on completed application code
+node --test tests/*.test.mjs
+# 28 passed, no skips
+python3 artifacts/guard_slow_recognition.py
+# 16 tracked payload files from its existing baseline; no findings;
+# source/generated manifests verified; credentialReads=0
+# Live-secret guard intentionally left to parent: guard_tracking.py reads credentials.
+git diff --check
+# clean
+```
+
+Tests and docs were strengthened afterward without production changes, including
+full-cycle overhead assertions (both modes passed again). The final verification
+is rerun before the documentation/test-only commit. Private HTTPS acceptance,
+real-secret comparison and any deployment remain the parent's gate. No skills
+were edited, no new dependency/network/provider call was introduced, and nothing
+was pushed or deployed.
+
 ## Toggle / While present and preview identifiers — superseding expiry contract
 
 Starting revision `afa9420`, branch `feat/visual-actions`. This change explicitly
