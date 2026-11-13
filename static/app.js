@@ -1,5 +1,7 @@
 import {CompletionRate, FrameState, projectBox, snapshotSize} from './core.mjs';
 import {TrackingClient} from './tracking-client.mjs';
+import {ActionView} from './action-view.mjs';
+const actions=new ActionView();
 
 const $ = id => document.getElementById(id);
 const video=$('video'), photo=$('photo'), stage=$('stage');
@@ -54,7 +56,7 @@ function liveStatus() {
   status('Camera live','live'); text('stage-note',`LIVE PREVIEW · ${tracking.state.toUpperCase()}`);
 }
 function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('age','—'); text('results','No detections yet. Camera mode can track visually supported objects.'); }
-function reset() { frame.reset();tracking.engaged=false;tracking.reset();lastVideoFrame=-1;lastTrackingCapture=null;lastSample=0; rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
+function reset() { actions.reset();frame.reset();tracking.engaged=false;tracking.reset();lastVideoFrame=-1;lastTrackingCapture=null;lastSample=0; rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
 function fail(message) { clearBoxes(); $('error').textContent=message; $('error').hidden=false; status('Needs attention'); }
 function clearError() { $('error').hidden=true; $('error').textContent=''; }
 function credentials() {
@@ -104,7 +106,7 @@ function schedule() {
 async function detect(single) {
   if(pending || (!single && (!running || document.hidden))) return;
   if(!single && performance.now()<retryAt) {schedule();return;}
-  const epoch=frame.epoch;
+  const epoch=frame.epoch, actionGeneration=actions.generation;
   let payload,capture=null,captured;
   try {
     payload=credentials();
@@ -130,6 +132,7 @@ async function detect(single) {
     failures=0; retryAt=0;
     if(epoch!==frame.epoch) return;
     const now=performance.now();
+    actions.accept(data.detections,captured,now,actionGeneration,Number($('confidence').value));
     if(!single) rate.record(now);
     $('latency').textContent=`${((now-captured)/1000).toFixed(2)} s`;
     if(frame.accept(epoch,data.detections,captured,now)) {
@@ -197,6 +200,7 @@ async function upload() {
 }
 function render() {
   const now=performance.now();
+  actions.tick(now);
   const tracks=running&&!document.hidden?tracking.current(now):[];
   const items=document.hidden?[]:running?frame.liveVisible(now,Number($('confidence').value),tracks,tracking.lossCutoffs):frame.visible(now,Number($('confidence').value));
   if(running&&!document.hidden)liveStatus();
@@ -247,9 +251,10 @@ $('labels').addEventListener('input',()=>{
   reset();clearError();
   if(running){liveStatus();if(!pending)schedule();}
 });
-$('confidence').addEventListener('input',()=>{$('confidence-value').value=`${Math.round(Number($('confidence').value)*100)}%`;render(true);});
+$('confidence').addEventListener('input',()=>{actions.reset();$('confidence-value').value=`${Math.round(Number($('confidence').value)*100)}%`;render(true);});
 $('cadence').addEventListener('change',()=>{if(running && !pending)schedule();});
 document.addEventListener('visibilitychange',()=>{
+  actions.reset();
   clearTimeout(timer); timer=null;
   if(running) {
     if(document.hidden) {frame.reset();tracking.reset();clearBoxes();status('Paused · tab hidden');$('stage-note').textContent='TAB HIDDEN · NEW SNAPSHOTS PAUSED';}

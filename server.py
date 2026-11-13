@@ -164,7 +164,7 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                 self.end_headers()
                 return
             static_routes = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript'), '/core.mjs': ('core.mjs', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
-            for name in ('tracking-worker.js', 'tracker-classic.js', 'tracking-client.mjs'):
+            for name in ('tracking-worker.js', 'tracker-classic.js', 'tracking-client.mjs', 'visual-actions.mjs', 'action-view.mjs'):
                 static_routes['/' + name] = (name, 'text/javascript')
             for name in ('opencv.js', 'LICENSE.opencv', 'COPYRIGHT.opencv', 'asset-manifest.json'):
                 static_routes['/trackingvendor/' + name] = ('trackingvendor/' + name, 'text/javascript' if name.endswith('.js') else 'text/plain')
