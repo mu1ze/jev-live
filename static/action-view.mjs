@@ -78,7 +78,7 @@ export class ActionView {
     }
     const cards=result.active.filter(r=>r.kind==='card'), key=JSON.stringify(cards.map(r=>[r.id,r.text]));
     if(key!==this.cardKey) {
-      this.cardKey=key;
+      this.cardKey=key;$('action-cards').tabIndex=cards.length?0:-1;
       $('action-cards').replaceChildren(...cards.map(rule=>{const node=document.createElement('p');node.textContent=rule.text;return node;}));
     }
     const message=!$('actions-enabled').checked?'Actions off · preview unchanged':result.active.length?`${result.active.length} active · ${result.active.map(r=>r.label).join(', ')}`:'Armed · waiting for two fresh positive results';

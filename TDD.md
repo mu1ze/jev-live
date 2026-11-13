@@ -1,5 +1,46 @@
 # Observed test-first checkpoints
 
+## Visual Actions — opt-in semantic reactions (local fixtures only)
+
+Each implementation slice was run RED before GREEN and committed incrementally
+on `feat/visual-actions`, based on clean `8f0b742`:
+
+| Slice | Observed RED | Verified GREEN |
+|---|---|---|
+| Pure recognition trigger | engine export undefined | one positive never enters; two enter once; repeated positives do not repeat |
+| Grace and cooldown | active count 1 instead of 0 after absence | 1200 ms absence boundary, recovery before boundary, rearm after 2000 ms cooldown |
+| Capture freshness | duplicate capture activated (1 instead of 0) | distinct capture ordering, future/late rejection, 2500 ms expiry and streak reset |
+| Confidence / priority | non-finite confidence activated all three rules (3 instead of 0) | finite threshold/exact-label gate, first active filter wins, cards coexist |
+| Opt-in browser slice | missing master control (0 instead of 1) | explicit enable, pre-enable capture ignored, CSS video filter outlives 350 ms box expiry but not stale semantic evidence |
+| Validation / editor / cards | validator undefined; editor absent | bounded 12-rule CRUD, three idempotent presets, untouched targets, textContent-only card rendering, pre-edit capture ignored |
+| Optional audio | adapter undefined; permission control disabled | no context on load, explicit gesture + per-rule permission, one 160 ms voice, cancellation invalidates pending resume |
+| Bounded history | Clear log control absent | latest 40 timestamped enter/clear events, explicit history clear, reset does not delete rules |
+| Card accessibility | active card tabindex None instead of 0 | active bounded region keyboard/pointer-scrollable, no empty-card tab stop |
+
+Additional Chromium regressions cover Stop/source/hidden/target/disable late
+replies, 2.5 s action versus 4 s snapshot TTL, delayed actual WebAudio resume
+through Stop/hidden/disable, local HTTP gateway normalization into a filter,
+unfiltered native drawImage pixels, mobile overflow and reduced motion. The
+provider is never called. The native fake camera and semantic answers are fixtures,
+not real recognition accuracy or an audible-device test.
+
+Latest focused run: **8 Chromium Visual Actions tests passed**, with
+ResourceWarnings treated as errors; **23 Node tests passed** (including existing
+core/tracking tests, five action-engine tests and one audio test). A separate
+`test_server test_tracking_security test_camera_start` run passed **16 Python
+tests** and reported `evalBlocked`, `ready`, `fetchBlocked`, and `version` all true.
+Two existing snapshot/idle-browser regressions also passed earlier. Full project
+regression/deployment/review remains the parent's acceptance gate.
+
+Harness correction: a late semantic reply immediately schedules the next serial
+request, so polling its brief aria-busy=false gap was unreliable. The fixture now
+drains the reply promise/microtasks rather than requiring that transient DOM state.
+The initial absence recovery test was corrected to 1199 ms (1700 ms was exactly
+the 1200 ms expiry boundary), preserving the explicit >=1200 expiry contract.
+One early existing browser run emitted a server BrokenPipe while deliberately
+aborting the worker asset; later focused/security runs were clean. No deployment,
+restart, credential reads, push, or real-provider calls were performed.
+
 ## Tracking stability — bounded capture handoff (local, synthetic)
 
 - RED Node history: earliest retained frame was 85 instead of 0 after 101 frames at 30 Hz; byte-budget fixture retained 90 instead of 20.

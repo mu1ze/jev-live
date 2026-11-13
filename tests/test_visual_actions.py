@@ -1,13 +1,17 @@
 """Visual Actions in real Chromium; semantic answers are local fixtures, not a provider."""
 import unittest
 import test_server as server_tests
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright=None
 
 
+@unittest.skipIf(sync_playwright is None,'Install optional playwright to run real browser tests')
 class VisualActionBrowserTests(unittest.TestCase):
     def setUp(self):
-        self.harness=server_tests.HTTPTests()
-        self.server=self.harness.running(transport=lambda req: {'answers': {}})
+        self.harness=server_tests.HTTPTests();self.answers={}
+        self.server=self.harness.running(transport=lambda req: {'answers': self.answers})
         self.server.__enter__()
         self.pw=sync_playwright().start()
         self.browser=self.pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream'])
@@ -16,7 +20,7 @@ class VisualActionBrowserTests(unittest.TestCase):
         self.page.route('**/tracking-worker.js',lambda route:route.abort())
         self.page.add_init_script("""
             window.fixtureHidden=false;Object.defineProperty(document,'hidden',{get:()=>window.fixtureHidden});
-            const original=window.fetch;
+            const original=window.fetch;window.fixtureFetch=original;
             window.fetch=(url,options)=>String(url).endsWith('api/detect')?new Promise(resolve=>{
                 window.reply=(detections,status=200)=>{window.reply=null;resolve(new Response(JSON.stringify({detections}),{status}));};
             }):original(url,options);
@@ -33,7 +37,64 @@ class VisualActionBrowserTests(unittest.TestCase):
     def answer(self,labels=('bottle',),confidence=.9,status=200):
         self.page.wait_for_function('() => !!window.reply')
         self.page.evaluate('args=>window.reply(...args)',[[{'label':label,'confidence':confidence,'box':dict(left=.1,right=.6,top=.2,bottom=.8)} for label in labels],status])
-        self.page.wait_for_function("() => document.querySelector('#results').getAttribute('aria-busy')==='false'")
+        # Drain the reply's promise/microtasks. Slow responses can schedule the next
+        # serial request immediately, so aria-busy=false may be too brief to poll.
+        self.page.evaluate('() => new Promise(resolve => setTimeout(resolve, 0))')
+
+    def test_real_http_fixture_normalization_drives_display_only_actions(self):
+        p=self.page
+        self.answers.update({'target_0_visible':{'type':'noul','noul':.96},'target_0':{'type':'box','confidence':.92,'box':dict(left=.1,right=.6,top=.2,bottom=.8)}})
+        p.evaluate('window.fetch=window.fixtureFetch')
+        p.locator('#labels').fill('bottle');p.locator('[data-preset="bottle"]').click()
+        p.locator('#actions-enabled').check();p.locator('#start').click()
+        p.wait_for_function("() => document.querySelector('#video').dataset.actionFilter==='cool'")
+        self.assertEqual(p.locator('#action-events li').count(),1)
+        # Canvas draws the native video, not CSS-filtered or letterboxed display pixels.
+        self.assertEqual(p.locator('#video').evaluate("v=>{const c=document.createElement('canvas'),x=c.getContext('2d');c.width=32;c.height=32;x.drawImage(v,0,0,32,32);const a=Array.from(x.getImageData(0,0,32,32).data);v.removeAttribute('data-action-filter');x.drawImage(v,0,0,32,32);return JSON.stringify(a)===JSON.stringify(Array.from(x.getImageData(0,0,32,32).data));}"),True)
+        p.locator('#stop').click()
+        p.wait_for_function("() => document.querySelector('#results').getAttribute('aria-busy')==='false'")
+
+    def test_action_capture_ttl_is_stricter_than_snapshot_box_ttl(self):
+        p=self.page
+        p.locator('#labels').fill('bottle');p.locator('[data-preset="bottle"]').click()
+        p.locator('#actions-enabled').check();p.locator('#start').click();self.answer()
+        p.wait_for_function('() => !!window.reply');p.wait_for_timeout(2550)
+        self.answer()
+        self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None)
+        self.answer();self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None,'late result did not count toward the new streak')
+        self.answer()
+        p.wait_for_function("() => document.querySelector('#video').dataset.actionFilter==='cool'")
+
+    def test_delayed_audio_unlock_cannot_rearm_after_lifecycle_reset(self):
+        p=self.page
+        p.add_init_script("""
+            window.fixtureToneStarts=0;
+            const Native=window.AudioContext, start=OscillatorNode.prototype.start;
+            window.AudioContext=class extends Native {
+                resume(){return super.resume().then(()=>new Promise(resolve=>window.releaseAudio=resolve));}
+            };
+            OscillatorNode.prototype.start=function(...args){window.fixtureToneStarts++;return start.apply(this,args);};
+        """)
+        for reset in ('stop','hidden','disable'):
+            with self.subTest(reset=reset):
+                p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
+                p.locator('#rule-label').fill('bottle');p.locator('#rule-sound').check();p.locator('#rule-save').click()
+                p.locator('#actions-enabled').check();p.locator('#start').click();self.answer()
+                p.locator('#actions-sound').check();p.wait_for_function('() => !!window.releaseAudio')
+                self.answer();p.wait_for_function('() => !!window.reply')
+                if reset=='hidden':p.evaluate("window.fixtureHidden=true;document.dispatchEvent(new Event('visibilitychange'))")
+                elif reset=='disable':p.locator('#actions-enabled').uncheck()
+                else:p.locator('#stop').click()
+                p.evaluate('window.releaseAudio()')
+                self.assertEqual(p.evaluate('window.fixtureToneStarts'),0)
+                self.answer() # obsolete pending capture
+                if reset=='hidden':p.evaluate("window.fixtureHidden=false;document.dispatchEvent(new Event('visibilitychange'))")
+                elif reset=='disable':p.locator('#actions-enabled').check()
+                else:p.locator('#start').click()
+                # A fresh visual entry after the reset must not use the late unlock.
+                self.answer();self.answer();self.answer()
+                self.assertEqual(p.evaluate('window.fixtureToneStarts'),0)
+                p.locator('#stop').click()
 
     def test_bounded_event_log_reset_and_rule_budget(self):
         p=self.page
@@ -127,6 +188,8 @@ class VisualActionBrowserTests(unittest.TestCase):
         self.answer(('bottle','wallet','lighter'));self.answer(('bottle','wallet','lighter'))
         p.wait_for_function("() => document.querySelector('#action-cards')?.textContent.includes('wallet found')")
         self.assertEqual(p.locator('#action-cards').inner_text(),literal)
+        self.assertEqual(p.locator('#action-cards').get_attribute('tabindex'),'0','bounded card region is keyboard-scrollable when active')
+        self.assertEqual(p.locator('#action-cards').evaluate('n=>getComputedStyle(n).pointerEvents'),'auto','overflowing cards can be scrolled on touch/pointer devices')
         self.assertEqual(p.locator('#action-cards img').count(),0,'card text is never HTML')
         self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool','first rule wins')
         self.assertEqual(p.locator('#action-cards').evaluate('n=>getComputedStyle(n).filter'),'none')

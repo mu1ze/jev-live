@@ -67,6 +67,75 @@ All POSTs require an exact matching `Origin`; no CORS is enabled. Direct local H
 - Stop/restart, target edits, key edits, file changes, hidden tabs and worker errors clear/invalidate tracks. Epoch IDs prevent late responses from reviving stale overlays. Transient Jev request errors may preserve a currently supported visual track only until bounded semantic expiry. Editing targets while camera permission is pending cancels that pending start.
 - Stop prevents new requests, but **cannot revoke a frame already sent or cancel billing for a request already being processed**. A pending request is allowed to settle before another is sent, including across restart.
 
+## Visual Actions (first version)
+
+**Off by default.** In the Visual Actions panel, add a preset or create a rule, add
+its **exact, case-sensitive label** to Choose your targets, then turn on **Enable
+actions** and Start camera. Bottle adds an underwater/cool display filter, wallet
+a celebratory green money glow, and lighter a warm glow. Presets add rules only;
+they never replace targets, start a camera, or change your update rate. An
+unconfigured target is explicitly marked. Reapplying a preset does not duplicate
+or overwrite an edited rule. Edit/Delete and a custom plain-text card are supported.
+
+- At most **12 rules**, labels up to 80 characters and card messages up to 240.
+  The earliest active filter in rule-list order wins; all active text cards can
+  coexist. Messages use `textContent`, never HTML. Filters are static CSS on the
+  displayed native video/photo only—not the stage, boxes, cards or inference
+  canvas. The unfiltered source and existing contain/letterbox geometry remain.
+- Only **successful semantic recognition** can trigger, not DOM boxes or worker
+  tracks. Two successive confident exact-label results are needed. The existing
+  confidence slider applies (minimum 70%). Repeated positives sustain one entry,
+  not repeat events or sounds. A successful negative breaks an unarmed streak;
+  for an active rule, **1,200 ms absence grace** absorbs short dropouts.
+- **2,500 ms capture-time stale expiry** is an independent hard bound, including
+  encoding and request time. Errors are not negatives, but cannot refresh evidence.
+  **2,000 ms cooldown from activation** plus a new two-positive streak controls
+  re-entry after disappearance. Box expiry at 350 ms does not cancel actions.
+  Expiry is evaluated on the existing 100 ms render tick; hidden-tab events clear
+  immediately. Use **1 Hz or faster**, with request latency comfortably below
+  2.5 seconds. Economy 0.2 Hz intentionally expires evidence between requests;
+  it cannot establish a two-result streak. Timeouts are never silently extended.
+- Source changes, Stop, hidden tabs, target/confidence edits, master toggle,
+  rule edits/deletion and **Reset active effects** clear transient state and audio.
+  Action generations also reject captures taken before an enable/configuration
+  change, without resetting the independent camera semantics. Starting an edit
+  clears effects immediately; subsequent fresh recognition can rearm unchanged
+  saved rules until a changed rule is saved. Each still-image Analyze resets the
+  source state: a single still-image request intentionally cannot activate rules.
+- Sounds require **both** the rule's Chime option and the explicit **Allow short
+  sounds on this device** checkbox gesture. No AudioContext is created on load.
+  One low-volume 160 ms sine chime is allowed at a time, with no queued playback;
+  a delayed audio-resume promise cannot play after reset/disable/Stop/hidden.
+  Unsupported WebAudio leaves visuals working. Browser/OS audio policy still
+  applies; no audible-device test is claimed.
+- The visible local event log keeps the latest **40 timestamped activation/clear
+  events**, with a Clear log button. Rule changes/Stop do not delete history.
+  Rules, permissions and history are **in-memory for this tab only**, not persisted.
+  No frames, credentials, raw provider replies, telemetry, webhooks or integrations
+  are saved/uploaded by actions. Reload returns everything to off/empty.
+
+Architecture: `static/visual-actions.mjs` is a pure deterministic-clock state
+machine; `action-view.mjs` owns the opt-in editor, display and bounded history;
+`action-audio.mjs` is a gesture-gated bounded WebAudio adapter. `app.js` feeds the
+engine only successful same-source semantic responses with capture timestamps
+and action-generation tokens. The gateway change only allowlists those three
+same-origin modules; auth, CSP, worker confinement and the default serial 4 Hz
+inference/tracking contracts are unchanged.
+
+Focused fixture checks (no provider or credentials):
+
+```sh
+INSTABOX_HEADLESS=1 PYTHONPATH=tests /data/workspace/jev-live/.venv-test/bin/python -m unittest test_visual_actions -v
+node --test tests/visual-actions.test.mjs tests/action-audio.test.mjs
+```
+
+UI verification selectors: `#actions-enabled`, `[data-preset="bottle"]`
+(and wallet/lighter), `#action-rules > li[data-rule-id]` with Edit/Delete buttons; `#rule-label`,
+`#rule-kind` (`cool`, `warm`, `money`, `card`), `#rule-text`, `#rule-sound`,
+`#rule-save`, `#rule-cancel`, `#actions-sound`, `#actions-state`,
+`#video[data-action-filter="cool"]`, `#action-cards`, `#action-events > li`,
+`#reset-actions`, `#clear-action-events`.
+
 ## Expanded target capacity
 
 The UI, gateway and worker support up to **24 distinct named targets** with one discovered instance per description. Boundary tests accept 24 and reject 25 without an upstream call, and the text field accommodates 24 maximum-length descriptions. A deterministic Chromium worker fixture retained all 24 IDs while alternating object motion; observed update cost on this VM was about 50 ms median / 59 ms p95. These are synthetic pixel measurements, not evidence that Jev recognizes 24 real objects correctly or that every device sustains the target rate. More requested targets increase recognition work and billing even when absent; lower the recognition cadence if needed. Local tracking is independent of recognition cadence.
