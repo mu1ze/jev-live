@@ -22,3 +22,20 @@ test('sound requires explicit unlock, is short and single-voice, and reset inval
   const waiting2=a.allow(true);await a.allow(false);release();await waiting2;
   a.play();assert.equal(started,1,'late resume cannot sound after opt-out');
 });
+
+test('obsolete resume rejection preserves newer permission and playable audio',async()=>{
+  let rejectOld,started=0,resumes=0;
+  const context={currentTime:10,state:'running',destination:{},
+    resume:()=>++resumes===1?new Promise((resolve,reject)=>{rejectOld=reject;}):Promise.resolve(),
+    createOscillator:()=>({frequency:{value:0},connect(){},disconnect(){},start(){started++;},stop(){}}),
+    createGain:()=>({gain:{setValueAtTime(){},exponentialRampToValueAtTime(){}},connect(){},disconnect(){}})};
+  const audio=new mod.ActionAudio(()=>context);
+  const oldPermission=audio.allow(true);
+  assert.equal(await audio.allow(false),false);
+  assert.equal(await audio.allow(true),true);
+  rejectOld(new Error('obsolete resume failed'));
+  assert.equal(await oldPermission,false);
+  assert.equal(audio.enabled,true,'old rejection cannot disable a newer permission');
+  assert.equal(audio.ready,true,'newer successful resume remains ready');
+  audio.play();assert.equal(started,1,'newer permission still permits playback');
+});

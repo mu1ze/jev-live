@@ -12,7 +12,7 @@ export class ActionAudio {
       await this.context.resume();
       if(generation!==this.generation||!this.enabled)return false;
       this.ready=true;return true;
-    } catch {this.enabled=false;return false;}
+    } catch {if(generation===this.generation)this.enabled=false;return false;}
   }
   cancel() {
     this.generation++;
