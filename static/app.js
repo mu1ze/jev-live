@@ -64,7 +64,7 @@ function liveStatus() {
   if(document.hidden) return;
   status('Camera live','live'); text('stage-note',actionMode()?'LIVE PREVIEW · ACTIONS / RECOGNITION ONLY':`LIVE PREVIEW · ${tracking.state.toUpperCase()}`);
 }
-function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('tracked-count','0'); text('age','—'); text('results','No detections yet. Camera mode can track visually supported objects.'); }
+function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('tracked-count','0'); text('age','—'); text('results',actionMode()?'No recognition yet. Actions use captured recognition only; no current locations.':'No detections yet. Camera mode can track visually supported objects.'); }
 function reset() { geometryCutoff=0;actions.reset();frame.reset();tracking.engaged=false;tracking.reset();lastVideoFrame=-1;lastTrackingCapture=null;lastSample=0; rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
 function fail(message) { clearBoxes(); $('error').textContent=message; $('error').hidden=false; status('Needs attention'); }
 function clearError() { $('error').hidden=true; $('error').textContent=''; }
@@ -189,20 +189,23 @@ async function detect(single) {
 async function start() {
   try {credentials();} catch(e) {fail(e.message);return;}
   stop(); clearError(); running=true; const epoch=frame.epoch;
+  let openingStream=null;
   status('Opening camera…','busy'); updateButtons();
   try {
     if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera requires HTTPS or localhost. You can use image upload instead.');
     const next=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720},facingMode:'environment'},audio:false});
     if(epoch!==frame.epoch || !running) {next.getTracks().forEach(t=>t.stop());return;}
-    stream=next; video.srcObject=stream; video.hidden=false; photo.hidden=true; $('empty').hidden=true;
+    openingStream=next;stream=next; video.srcObject=stream; video.hidden=false; photo.hidden=true; $('empty').hidden=true;
+    // Install source cleanup before play() yields: workflow epochs may change
+    // during playback startup without replacing this retained camera stream.
+    next.getVideoTracks()[0].addEventListener('ended',()=>{if(running&&stream===next){stop();fail('Camera disconnected. Reconnect and Start again.');}});
     await video.play();
-    if(epoch!==frame.epoch || !running) return;
+    if(stream!==next || !running) return;
     $('source-label').textContent='LIVE CAMERA'; liveStatus();
     startTracking();
-    stream.getVideoTracks()[0].addEventListener('ended',()=>{if(running){stop();fail('Camera disconnected. Reconnect and Start again.');}});
     detect(false);
   } catch(e) {
-    if(epoch!==frame.epoch) return;
+    if(epoch!==frame.epoch&&(!openingStream||stream!==openingStream)) return;
     stop(); fail(e.name==='NotAllowedError'?'Camera permission denied. Allow camera access or use an image.':e.name==='NotFoundError'?'No camera found. Choose an image below instead.':e.message);
   }
 }
@@ -268,7 +271,7 @@ function render() {
   text('tracked-count',String(items.filter(d=>d.tracked).length));
   if(actionMode())actions.identifiers(recognized,frame.captured,now);
   const fresh=frame.captured&&now-frame.captured<frame.ttl;
-  text('results',recognized.length?`Last recognized · ${recognized.map(d=>`${d.label} · ${Math.round(d.confidence*100)}% recognition`).join('   /   ')} · captured result, not current location; expires 4s after capture.`:fresh?'Last recognition · No detections above threshold.':frame.captured?'Last recognition expired · awaiting a fresh result.':'No detections yet. Camera mode can track visually supported objects.');
+  text('results',recognized.length?`Last recognized · ${recognized.map(d=>`${d.label} · ${Math.round(d.confidence*100)}% recognition`).join('   /   ')} · captured result, not current location; expires 4s after capture.`:fresh?'Last recognition · No detections above threshold.':frame.captured?'Last recognition expired · awaiting a fresh result.':actionMode()?'No recognition yet. Actions use captured recognition only; no current locations.':'No detections yet. Camera mode can track visually supported objects.');
   if(frame.captured) {
     const age=now-frame.captured;
     text('age',age<frame.ttl?`${(age/1000).toFixed(1)} s`:'Expired');
@@ -277,6 +280,9 @@ function render() {
 }
 $('tracking-details').parentElement.addEventListener('toggle',()=>render());
 $('workflow-mode').addEventListener('change',()=>{
+  // A permission promise has no stream to retain. Cancel its epoch and let the
+  // late result stop its tracks, just like editing targets while opening camera.
+  if(running&&!stream){stop();workflowUI();status('Workflow updated · Start camera');return;}
   stopTracking();reset();workflowUI();
   if(running&&stream){startTracking();if(!pending)schedule();}
   render();

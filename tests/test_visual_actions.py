@@ -42,6 +42,61 @@ class VisualActionBrowserTests(unittest.TestCase):
         # serial request immediately, so aria-busy=false may be too brief to poll.
         self.page.evaluate('() => new Promise(resolve => setTimeout(resolve, 0))')
 
+    def test_actions_still_upload_recognizes_without_boxes_or_runtime(self):
+        p=self.page;requests=[];p.on('request',lambda req:requests.append(req.url))
+        raw=__import__('base64').b64decode(self.harness.payload()['image'])
+        p.locator('#labels').fill('bottle')
+        p.locator('#upload').set_input_files({'name':'fixture.png','mimeType':'image/png','buffer':raw})
+        p.locator('#analyze').click();self.answer()
+        self.assertEqual(p.locator('#count').inner_text(),'1')
+        self.assertEqual(p.locator('.box').count(),0)
+        self.assertTrue(p.locator('#photo').is_visible())
+        self.assertIn('RECOGNITION ONLY',p.locator('#stage-note').inner_text())
+        self.assertFalse(any('tracking-worker' in url or 'opencv.js' in url for url in requests))
+
+    def test_workflow_switch_then_play_rejection_releases_retained_camera(self):
+        p=self.page
+        p.evaluate("""() => {
+            const play=HTMLMediaElement.prototype.play;
+            HTMLMediaElement.prototype.play=function(){return play.call(this).then(()=>new Promise((resolve,reject)=>window.rejectPlay=()=>reject(new Error('fixture play failure'))))};
+        }""")
+        p.locator('#start').click();p.wait_for_function('() => !!window.rejectPlay')
+        p.evaluate('window.openingStream=document.querySelector("#video").srcObject')
+        p.locator('#workflow-mode').select_option('tracking')
+        p.evaluate('window.rejectPlay()');p.evaluate('() => new Promise(resolve=>setTimeout(resolve,0))')
+        self.assertTrue(p.locator('#start').is_enabled(),'failed playback must not strand retained camera')
+        self.assertTrue(p.evaluate('openingStream.getTracks().every(t=>t.readyState==="ended")'))
+
+    def test_workflow_switch_during_video_play_keeps_disconnect_cleanup(self):
+        p=self.page
+        p.evaluate("""() => {
+            const play=HTMLMediaElement.prototype.play;
+            HTMLMediaElement.prototype.play=function(){return play.call(this).then(()=>new Promise(resolve=>window.releasePlay=resolve))};
+        }""")
+        p.locator('#start').click();p.wait_for_function('() => !!window.releasePlay')
+        p.locator('#workflow-mode').select_option('tracking')
+        p.evaluate('window.releasePlay()');p.evaluate('() => new Promise(resolve=>setTimeout(resolve,0))')
+        self.assertEqual(p.locator('#source-label').inner_text(),'LIVE CAMERA')
+        p.evaluate('document.querySelector("#video").srcObject.getVideoTracks()[0].dispatchEvent(new Event("ended"))')
+        self.assertTrue(p.locator('#start').is_enabled(),'mode switch during play must retain camera disconnect cleanup')
+        self.assertTrue(p.evaluate('document.querySelector("#video").srcObject===null'))
+
+    def test_workflow_switch_cancels_pending_camera_permission_without_leaks(self):
+        p=self.page
+        p.evaluate("""() => {
+            navigator.mediaDevices.getUserMedia=()=>new Promise(resolve=>window.releaseCamera=()=>{
+                const canvas=document.createElement('canvas');canvas.width=640;canvas.height=360;
+                window.lateStream=canvas.captureStream(12);resolve(lateStream);
+            });
+        }""")
+        p.locator('#start').click();p.wait_for_function('() => !!window.releaseCamera')
+        p.locator('#workflow-mode').select_option('tracking')
+        self.assertTrue(p.locator('#start').is_enabled(),'workflow change cannot strand pending Start')
+        p.evaluate('window.releaseCamera()');p.evaluate('() => new Promise(resolve=>setTimeout(resolve,0))')
+        self.assertTrue(p.evaluate('lateStream.getTracks().every(t=>t.readyState==="ended")'))
+        self.assertTrue(p.evaluate('document.querySelector("#video").srcObject===null'))
+        self.assertFalse(p.evaluate('!!window.reply'))
+
     def test_running_workflow_transitions_drain_and_resume_measured_tracking(self):
         from test_tracking import CAMERA
         p=self.page;p.unroute('**/tracking-worker.js')
@@ -129,6 +184,7 @@ class VisualActionBrowserTests(unittest.TestCase):
         p.locator('#labels').fill('bottle');p.locator('[data-preset="bottle"]').click();p.locator('#actions-enabled').check()
         p.locator('#start').click();p.wait_for_function('() => !!window.reply');p.wait_for_timeout(500)
         self.assertEqual(p.evaluate('overhead.draws'),1,'pending semantics must not sample pixels')
+        self.assertNotIn('track visually',p.locator('#results').inner_text())
         self.answer();self.answer();self.answer();self.answer()
         self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool')
         self.assertEqual(p.locator('.box').count(),0)
@@ -347,7 +403,7 @@ class VisualActionBrowserTests(unittest.TestCase):
 
     def test_lifecycle_clears_effects_and_rejects_old_replies(self):
         p=self.page
-        for mode,change in __import__('itertools').product(('toggle','present'),('hidden','targets','confidence','disable','stop','source','edit','reset')):
+        for mode,change in __import__('itertools').product(('toggle','present'),('hidden','targets','confidence','disable','stop','source','edit','reset','workflow')):
             with self.subTest(mode=mode,change=change):
                 p.reload();p.locator('#workflow-mode').select_option('actions');p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
                 p.locator('#rule-label').fill('bottle');p.locator('#rule-mode').select_option(mode);p.locator('#rule-save').click()
@@ -362,6 +418,7 @@ class VisualActionBrowserTests(unittest.TestCase):
                 elif change=='stop':p.locator('#stop').click()
                 elif change=='edit':p.locator('#action-rules').get_by_role('button',name='Edit').click()
                 elif change=='reset':p.locator('#reset-actions').click()
+                elif change=='workflow':p.locator('#workflow-mode').select_option('tracking');p.locator('#workflow-mode').select_option('actions')
                 else:
                     raw=__import__('base64').b64decode(self.harness.payload()['image'])
                     p.locator('#upload').set_input_files({'name':'fixture.png','mimeType':'image/png','buffer':raw})
