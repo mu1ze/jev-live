@@ -83,20 +83,34 @@ or overwrite an edited rule. Edit/Delete and a custom plain-text card are suppor
   displayed native video/photo only—not the stage, boxes, cards or inference
   canvas. The unfiltered source and existing contain/letterbox geometry remain.
 - Only **successful semantic recognition** can trigger, not DOM boxes or worker
-  tracks. Two successive confident exact-label results are needed. The existing
-  confidence slider applies (minimum 70%). Repeated positives sustain one entry,
-  not repeat events or sounds. A successful negative breaks an unarmed streak;
-  for an active rule, **1,200 ms absence grace** absorbs short dropouts.
-- **2,500 ms capture-time stale expiry** is an independent hard bound, including
-  encoding and request time. Errors are not negatives, but cannot refresh evidence.
-  **2,000 ms cooldown from activation** plus a new two-positive streak controls
-  re-entry after disappearance. Box expiry at 350 ms does not cancel actions.
-  Expiry is evaluated on the existing 100 ms render tick; hidden-tab events clear
-  immediately. Use **1 Hz or faster**, with request latency comfortably below
-  2.5 seconds. Economy 0.2 Hz intentionally expires evidence between requests;
-  it cannot establish a two-result streak. Timeouts are never silently extended.
+  tracks. Two successive fresh confident exact-label captures confirm an appearance.
+  The confidence slider applies (minimum 70%). Duplicates, reordered/future captures
+  and replies aged **2,500 ms or more from capture** are ignored; successful capture
+  gaps at that boundary restart confirmation/absence sequences. Repeated positives
+  during one appearance never repeat a toggle or activation sound.
+- Choose **Activation mode** in each rule's editor; its mode is also listed per rule:
+  - **Toggle (default for new rules, presets and legacy objects with no mode):**
+    confirmation flips the latched effect ON. Remove the target until **three
+    distinct successful negative captures span at least 2,000 ms of capture time**;
+    this rearms without changing the effect. Two new positive captures then flip
+    it OFF. Repeat removal/return to flip it again.
+  - **While present:** confirmation activates. The same three-negative/2-second
+    evidence clears the effect and rearms. Brief misses do not flicker.
+- **No render-clock effect expiry.** Silence, errors, tracking loss and stale replies
+  do not prove absence or switch effects off. With no fresh action observations,
+  badges show **scanning paused / uncertain (not absence)** independently of the
+  latched ON/OFF state. At serial 1.4-second latency effects stay stable. Absence
+  takes at least 2 capture seconds plus response latency (and enough samples).
+  Use **1 Hz or faster** and replies younger than 2.5 seconds; economy 0.2 Hz cannot
+  confirm or rearm. Stop/reset is always available when recognition pauses.
+- Read the **target identifiers beside the preview**, even with no action rule or
+  pixel tracking: exact labels and confirmed/recognized **last capture** age, never
+  a claimed current location. Semantic-only positive badges expire within the
+  existing **4-second capture bound**; independent rule ON/OFF/mode/armed badges
+  remain. Nodes are reconciled using safe text, with readable wrapping on mobile.
+  Live geometry still expires at **350 ms**; no stale boxes are extended.
 - Source changes, Stop, hidden tabs, target/confidence edits, master toggle,
-  rule edits/deletion and **Reset active effects** clear transient state and audio.
+  rule edits/deletion and **Reset active effects** clear ALL latched/transient state and audio.
   Action generations also reject captures taken before an enable/configuration
   change, without resetting the independent camera semantics. Starting an edit
   clears effects immediately; subsequent fresh recognition can rearm unchanged

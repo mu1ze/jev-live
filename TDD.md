@@ -1,5 +1,62 @@
 # Observed test-first checkpoints
 
+## Toggle / While present and preview identifiers — superseding expiry contract
+
+Starting revision `afa9420`, branch `feat/visual-actions`. This change explicitly
+supersedes the older sections below that require automatic 2500ms effect expiry.
+2500ms remains an **incoming capture freshness / successive-observation gap**
+boundary, not a render-clock OFF timer. Missing rule mode migrates to Toggle,
+matching new editor/preset defaults; there is no legacy-expiry fallback.
+
+Observed RED → GREEN checkpoints:
+
+- Added `toggle latches across time ...`: the old engine failed `silence is not
+  absence` (0 active vs 1). Removing timer-based OFF and separating `active` from
+  appearance `armed` state made it pass. Three fresh distinct successful negatives
+  spanning >=2000 capture ms rearm; two fresh positives flip; sustained positives
+  do not. The engine regression set deliberately replaces old expiry/cooldown
+  assertions with both modes, repeated cycles, serial 1400ms replies, invalid
+  captures, exact confidence/label checks, 1999/2000ms absence and 2499/2500ms gaps,
+  mixed-mode filter priority/cards and full reset.
+- Added editor/identifier Chromium tracer: old UI failed `mode is an explicit
+  editor choice` (no `#rule-mode`). It now passes with `toggle`/`present` options,
+  mode edit/save roundtrip, a confirmed target without rules or tracking, bounded
+  semantic expiry, independent latched ON/uncertain badge and mobile layout.
+- Added Chromium two-mode negative/reappearance cycles with 1400ms positives,
+  stable identifier node identity, and lifecycle/in-flight matrix for BOTH modes
+  (hidden, target/confidence, disable, Stop, source, edit, reset). Existing browser
+  expiry checks were deliberately migrated: silence/errors preserve Toggle ON,
+  not silently relaxed into accepting either state. Incoming stale-capture rejection
+  remains tested separately. Audio generations, safe cards and arbitration remain.
+
+Root design: the pure engine consumes only successful ordered capture evidence;
+`tick()` cannot change state. The same evidence tracker confirms semantic-only
+identifiers independently of action opt-in. `#target-identifiers` reconciles stable
+text nodes beside the preview, with <=4s last-capture semantics and independent
+rule mode/ON/OFF/armed state. No geometry, capture binding, replay, worker limits,
+server routes or network behavior changed. All verification uses local fixtures,
+not provider/user-device measurements. No push, deployment, restart or credentials.
+
+Verification on the completed application code:
+
+```sh
+INSTABOX_HEADLESS=1 /data/workspace/jev-live/.venv-test/bin/python -W error::ResourceWarning -m unittest discover -s tests -v
+# 60 tests passed, 280.069s, no skips
+node --test tests/*.test.mjs
+# 28 tests passed, no skips
+python3 artifacts/guard_slow_recognition.py
+# 16 files scanned relative to its b70f154 baseline; no findings, zero credential reads
+# tracker source/generated manifest hashes verified; live-secret comparison not run
+git diff --check
+# clean
+```
+
+Implementation milestones: `7374bdc` (pure evidence engine), `5b9b822` (editor,
+identifiers, browser regressions). Private HTTPS acceptance/deployment remains the
+parent's gate. The earlier credential-free publication guard is used separately;
+the credential-reading guards and private ignored probes are not modified/run.
+
+
 ## Slow recognition — capture binding, cooperative replay, independent results
 
 All timings below are local Chromium fixtures, not real-provider or user-device
