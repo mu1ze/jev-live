@@ -41,6 +41,59 @@ class VisualActionBrowserTests(unittest.TestCase):
         # serial request immediately, so aria-busy=false may be too brief to poll.
         self.page.evaluate('() => new Promise(resolve => setTimeout(resolve, 0))')
 
+    def test_both_modes_capture_confirmed_absence_and_return_cycles(self):
+        p=self.page
+        for mode in ('toggle','present'):
+            with self.subTest(mode=mode):
+                p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
+                p.locator('#rule-label').fill('bottle');p.locator('#rule-mode').select_option(mode);p.locator('#rule-save').click()
+                p.locator('#actions-enabled').check();p.locator('#start').click()
+                for _ in range(2):
+                    p.wait_for_function('() => !!window.reply');p.wait_for_timeout(1400);self.answer()
+                self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool')
+                p.evaluate("window.badgeNode=document.querySelector('#target-identifiers p')")
+                self.answer();self.answer()
+                self.assertEqual(p.locator('#action-events li').count(),1,'sustained positives do not toggle')
+                for i in range(3):
+                    p.wait_for_function('() => !!window.reply');p.wait_for_timeout(1100);self.answer(())
+                    if i<2:self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool')
+                self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool' if mode=='toggle' else None)
+                self.assertIn('Armed',p.locator('#target-identifiers').inner_text())
+                self.answer();self.answer()
+                p.wait_for_timeout(120)
+                self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None if mode=='toggle' else 'cool')
+                self.assertTrue(p.evaluate("window.badgeNode===document.querySelector('#target-identifiers p')"),'identifier nodes are reconciled, not replaced')
+                self.assertEqual(p.locator('#action-events li').count(),2 if mode=='toggle' else 3)
+                p.locator('#stop').click()
+                if p.evaluate('!!window.reply'):p.evaluate('window.reply([])')
+
+    def test_mode_editor_roundtrip_and_identifiers_without_tracking_or_rules(self):
+        p=self.page
+        self.assertEqual(p.locator('#rule-mode').count(),1,'mode is an explicit editor choice')
+        self.assertEqual(p.locator('#rule-mode').input_value(),'toggle')
+        p.locator('#labels').fill('bottle');p.locator('#start').click()
+        for _ in range(2):
+            p.wait_for_function('() => !!window.reply');p.wait_for_timeout(1400);self.answer()
+        badge=p.locator('#target-identifiers')
+        self.assertIn('bottle',badge.inner_text());self.assertIn('Confirmed',badge.inner_text())
+        self.assertIn('last capture',badge.inner_text());self.assertEqual(p.locator('.box').count(),0)
+        self.assertEqual(p.locator('#action-rules li').count(),0)
+        p.wait_for_timeout(2700)
+        self.assertNotIn('Confirmed',badge.inner_text(),'semantic-only identifiers obey the existing 4s bound')
+        p.locator('#rule-label').fill('bottle');p.locator('#rule-mode').select_option('present');p.locator('#rule-save').click()
+        self.assertIn('While present',p.locator('#action-rules').inner_text())
+        p.locator('#action-rules').get_by_role('button',name='Edit').click()
+        self.assertEqual(p.locator('#rule-mode').input_value(),'present')
+        p.locator('#rule-mode').select_option('toggle');p.locator('#rule-save').click()
+        self.assertIn('Toggle',p.locator('#action-rules').inner_text())
+        p.locator('#actions-enabled').check()
+        self.answer();self.answer();self.answer()
+        self.assertIn('effect ON',badge.inner_text());self.assertIn('remove and return',badge.inner_text())
+        p.wait_for_timeout(2700)
+        self.assertIn('effect ON',badge.inner_text());self.assertIn('uncertain',badge.inner_text())
+        p.set_viewport_size({'width':390,'height':844})
+        self.assertTrue(p.evaluate('document.documentElement.scrollWidth<=innerWidth'))
+
     def test_real_http_fixture_normalization_drives_display_only_actions(self):
         p=self.page
         self.answers.update({'target_0_visible':{'type':'noul','noul':.96},'target_0':{'type':'box','confidence':.92,'box':dict(left=.1,right=.6,top=.2,bottom=.8)}})
@@ -76,8 +129,10 @@ class VisualActionBrowserTests(unittest.TestCase):
         p.wait_for_function("() => document.querySelector('#video').dataset.actionFilter==='cool'",timeout=1000)
         self.assertEqual(p.locator('.box').count(),0,'slow recognition cannot display stale geometry')
         self.assertEqual(p.locator('#action-events li').count(),1)
-        # No next answer: expiry must still use the last capture, not its arrival.
-        p.wait_for_function("() => !document.querySelector('#video').hasAttribute('data-action-filter')",timeout=1800)
+        # No next answer is uncertainty, not proof of absence (new Toggle contract).
+        p.wait_for_timeout(2700)
+        self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool')
+        self.assertIn('uncertain',p.locator('#target-identifiers').inner_text())
 
     def test_delayed_audio_unlock_cannot_rearm_after_lifecycle_reset(self):
         p=self.page
@@ -154,10 +209,11 @@ class VisualActionBrowserTests(unittest.TestCase):
 
     def test_lifecycle_clears_effects_and_rejects_old_replies(self):
         p=self.page
-        for change in ('hidden','targets','confidence','disable','stop','source'):
-            with self.subTest(change=change):
+        for mode,change in __import__('itertools').product(('toggle','present'),('hidden','targets','confidence','disable','stop','source','edit','reset')):
+            with self.subTest(mode=mode,change=change):
                 p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
-                p.locator('[data-preset="bottle"]').click();p.locator('#actions-enabled').check();p.locator('#start').click()
+                p.locator('#rule-label').fill('bottle');p.locator('#rule-mode').select_option(mode);p.locator('#rule-save').click()
+                p.locator('#actions-enabled').check();p.locator('#start').click()
                 self.answer();self.answer()
                 p.wait_for_function("() => document.querySelector('#video').dataset.actionFilter==='cool'")
                 p.wait_for_function('() => !!window.reply')
@@ -166,6 +222,8 @@ class VisualActionBrowserTests(unittest.TestCase):
                 elif change=='confidence':p.locator('#confidence').fill('0.8')
                 elif change=='disable':p.locator('#actions-enabled').uncheck()
                 elif change=='stop':p.locator('#stop').click()
+                elif change=='edit':p.locator('#action-rules').get_by_role('button',name='Edit').click()
+                elif change=='reset':p.locator('#reset-actions').click()
                 else:
                     raw=__import__('base64').b64decode(self.harness.payload()['image'])
                     p.locator('#upload').set_input_files({'name':'fixture.png','mimeType':'image/png','buffer':raw})
@@ -272,5 +330,6 @@ class VisualActionBrowserTests(unittest.TestCase):
         self.assertEqual(p.locator('#video').evaluate('n=>getComputedStyle(n).objectFit'),'contain')
         self.answer(status=503) # error is not a negative; no new recognition evidence
         self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool')
-        p.wait_for_function("() => !document.querySelector('#video').hasAttribute('data-action-filter')",timeout=3500)
+        p.wait_for_timeout(2700)
+        self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool','errors/no replies do not turn a latched toggle off')
         self.assertEqual(p.evaluate('localStorage.length+sessionStorage.length'),0)

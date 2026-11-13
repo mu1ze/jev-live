@@ -249,6 +249,7 @@ function render() {
   const recognized=document.hidden?[]:frame.visible(now,Number($('confidence').value));
   text('count',String(recognized.length));
   text('tracked-count',String(items.filter(d=>d.tracked).length));
+  actions.identifiers(recognized,frame.captured,now);
   const fresh=frame.captured&&now-frame.captured<frame.ttl;
   text('results',recognized.length?`Last recognized · ${recognized.map(d=>`${d.label} · ${Math.round(d.confidence*100)}% recognition`).join('   /   ')} · captured result, not current location; expires 4s after capture.`:fresh?'Last recognition · No detections above threshold.':frame.captured?'Last recognition expired · awaiting a fresh result.':'No detections yet. Camera mode can track visually supported objects.');
   if(frame.captured) {
