@@ -1,5 +1,85 @@
 # Observed test-first checkpoints
 
+## Slow recognition — capture binding, cooperative replay, independent results
+
+All timings below are local Chromium fixtures, not real-provider or user-device
+measurements. Starting revision: `b70f154`; no credentials, provider requests,
+push, deployment, or restart.
+
+- **Root cause 1:** `detect()` drew/encoded a new snapshot, then tried the regular
+  throttled/busy sampler to obtain its frame ID. At ~12Hz and 1.4s responses this
+  often returned null (`capture-unavailable`). Reusing an old ID after drawing new
+  pixels was also not a safe association. The new browser regression observed a
+  null capture among three warmed responses before the fix. Afterward all warmed
+  images matched their submitted pixel-frame JPEG byte-for-byte. Recognition now
+  uses a recent (<350ms), exact already-submitted canvas and its original capture
+  timestamp, or takes an independent snapshot immediately if none is available.
+  It never waits for worker readiness/busy state. Request-start cadence and round
+  trip remain separate from pixel capture age.
+- **Root cause 2:** synchronous historical LK replay monopolized the only worker.
+  One frame remained in flight, so the UI could not submit intervening pixels;
+  subsequent capture gaps exceeded the existing 200ms evidence-gap bound. A real
+  OpenCV fixture with 12Hz sampling, a 1.4s seed delay, and 20ms added per replay
+  transition processed **zero frames during replay** before the fix. Cooperative
+  transitions now yield worker tasks; the fixture processed **8 frames during
+  ~640–657ms replay**, accepted the seed, displayed a fresh track, and had no
+  `frame-gap` losses. Replay catches up to the actual latest pixels before commit.
+- **Root cause 3:** `count`/`results` used the 350ms live geometry list instead of
+  semantic capture results. Valid 1.4s replies were invisible without a tracker.
+  `count` now counts thresholded last-capture semantic positives, capped by the
+  existing 4s capture TTL. `tracked-count` separately counts current measured
+  geometry; `age` shows last semantic capture age/Expired. Text explicitly says
+  captured recognition is not a current location. A uniform 12Hz stream and a
+  16s-loading worker both show semantic positives with zero live boxes, survive
+  worker failure, clear on a negative response, and expire at 4s. This test was
+  also rerun RED against the preceding commit with a verified playing fixture:
+  round trip 1.40–1.41s, capture age 2.1s, but count 0.
+- Worker failure suppresses previously stored geometry without deleting semantics
+  or invalidating a newer capture's in-flight recognition. The existing six-object
+  mixed/partial-texture regression and worker-failure lifecycle tests remain intact.
+- No queue/lifetime increases: one frame plus one seed operation in flight;
+  synchronous transitions stay indivisible; 2s replay wall budget (including
+  yields), 4s/128 frames/48MiB history, 350ms live geometry, 10s frame watchdog,
+  60s startup. Deadlines and evictions are rechecked after yields; no gray frames
+  are pinned. Reset cancels the old replay owner before any disposed Mat access;
+  a real-worker reset during replay reports zero obsolete replies and a new-source
+  track only. Partial trial geometry is never published.
+
+Final verification on the completed code:
+
+```sh
+INSTABOX_HEADLESS=1 /data/workspace/jev-live/.venv-test/bin/python -W error::ResourceWarning -m unittest discover -s tests -v
+# 57 tests passed, 244.150s
+node --test tests/*.test.mjs
+# 26 tests passed
+python3 artifacts/guard_slow_recognition.py
+# 10 changed tracked files, no static findings, source/generated SHA256 verified
+# Zero credential reads; no live-secret comparison (explicitly prohibited).
+git diff --check
+# clean
+```
+
+The existing ignored `publication_guard.py` and `guard_tracking.py` load real
+credentials; neither was executed. A credential-free adaptation applied their
+filename/private-host/token/dynamic-execution checks to this change and verified
+the generated tracker manifest. The original live-secret comparison remains a
+parent publication gate. Logs and the adapted guard are ignored local artifacts:
+`artifacts/slow-recognition-python-tests.log`, `slow-recognition-node-tests.log`,
+`slow-recognition-publication-scan.json`, and `guard_slow_recognition.py`.
+
+The first full run exposed two existing failure-geometry regressions after
+semantics were retained; adding a geometry-only capture cutoff preserved their
+original assertions without weakening tests. The subsequent full run above was
+clean. One initial uniform-camera fixture did not repaint its canvas and never
+reached video.play(); it was corrected to repaint at 12Hz, then replayed against
+the old app to establish a valid RED rather than treating startup as the symptom.
+
+Limits: one slow OpenCV transition can still block its worker; motion, occlusion,
+low texture, true capture gaps, history eviction or CPU limits can honestly reject
+tracking. Cooperative scheduling does not reduce provider latency or make a 1.4s
+serial request stream run at 4Hz. Capture history is not a live-position claim.
+
+
 ## Visual Actions — opt-in semantic reactions (local fixtures only)
 
 Each implementation slice was run RED before GREEN and committed incrementally

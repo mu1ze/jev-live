@@ -2,6 +2,27 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {PixelTracker} from '../static/tracker.mjs';
 const cv={Mat:class {constructor(){this.rows=6;this.data32F=new Float32Array([50,50,60,50,70,50,50,60,60,60,70,60]);}delete(){} static zeros(){return new this();}},Point:class{},Scalar:class{},rectangle(){},goodFeaturesToTrack(){}};
+test('cooperative replay rechecks deadline and eviction after yielding without partial publication',context=>{
+  let now=0;context.mock.method(performance,'now',()=>now);
+  const original=PixelTracker.prototype.advance;PixelTracker.prototype.advance=function(){};
+  try {
+    for(const reason of ['replay-budget','capture-frame-expired']) {
+      now=0;
+      const t=new PixelTracker(cv,320,320);
+      t.frames=Array.from({length:18},(_,i)=>({frameId:i,timestampMs:i*83,gray:{}}));
+      const replay=t.seedSteps(0,[{label:'person',confidence:.9,box:[.1,.1,.5,.5]}]);
+      assert.equal(replay.next().done,false);
+      assert.equal(t.tracks.size,0,'trial positions must stay private during replay');
+      if(reason==='replay-budget')now=2000;
+      else t.frames.splice(0,2);
+      const result=replay.next();
+      assert.equal(result.done,true);
+      assert.equal(result.value.accepted.length,0);
+      assert.equal(result.value.rejected[0].reason,reason);
+      assert.equal(t.tracks.size,0);
+    }
+  } finally {PixelTracker.prototype.advance=original;}
+});
 test('cooperative seed replay accepts intervening 12Hz frames without a self-inflicted gap',()=>{
   const t=new PixelTracker(cv,320,320);
   t.frames=Array.from({length:18},(_,i)=>({frameId:i,timestampMs:i*83,gray:{}}));

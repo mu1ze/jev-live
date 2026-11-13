@@ -127,13 +127,29 @@ class TrackingTests(unittest.TestCase):
                         const end=performance.now()+4000;
                         while(!seedDone&&performance.now()<end)await sleep(10);
                         clearInterval(sampler);
-                        return {framesDuring,seed,diagnostics:c.diagnostics(),visible:c.current(performance.now()).length};
+                        const firstResult={framesDuring,seed,diagnostics:c.diagnostics(),visible:c.current(performance.now()).length};
+                        // Reset while a second replay is suspended: the old owner must
+                        // never resume into disposed gray Mats or publish into a new source.
+                        c.reset();const oldGeneration=c.generation,old=push();
+                        while(c.busy)await sleep(5);
+                        const again=setInterval(()=>{if(!c.busy)push()},83);
+                        await sleep(700);
+                        let obsoleteReplies=0;
+                        c.worker.addEventListener('message',({data:m})=>{if(m.type==='seed'&&m.generation===oldGeneration)obsoleteReplies++});
+                        c.seed(old,[{label:'old',confidence:.9,box:{left:.2,top:.2,right:.8,bottom:.8}}],.7);
+                        await sleep(60);clearInterval(again);c.reset();
+                        const fresh=push();while(c.busy)await sleep(5);
+                        c.seed(fresh,[{label:'new',confidence:.9,box:{left:.2,top:.2,right:.8,bottom:.8}}],.7);
+                        await sleep(250);
+                        firstResult.reset={obsoleteReplies,ready:c.ready,labels:c.current(performance.now()).map(t=>t.label)};
+                        return firstResult;
                     } finally {c.close()}
                 }""")
                 self.assertGreater(result['framesDuring'],1,'seed replay starved pixel messages')
                 self.assertEqual(len(result['seed']['seedResult']['accepted']),1)
                 self.assertEqual(result['diagnostics']['losses'].get('frame-gap',0),0)
                 self.assertEqual(result['visible'],1)
+                self.assertEqual(result['reset'],dict(obsoleteReplies=0,ready=True,labels=['new']))
                 print('12Hz / 1.4s / slowed real replay:',result,flush=True)
             finally:
                 browser.close()
