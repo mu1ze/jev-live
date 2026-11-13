@@ -98,7 +98,8 @@ export class ActionView {
     const recent=!document.hidden&&captured&&now-captured<4000;
     for(const label of labels) {
       const found=recent&&recognized.some(d=>d.label===label);
-      const confirmed=found&&this.targets.states.get(label)?.hits>=2;
+      const targetState=this.targets.states.get(label);
+      const confirmed=found&&targetState?.positive===captured&&targetState.hits>=2;
       rows.set(`target:${label}`,`${label} · ${found?`${confirmed?'Confirmed':'Recognized'} · last capture ${Math.floor((now-captured)/1000)}s ago · not current location`:'Scanning / uncertain · no recent positive capture'}`);
     }
     for(const rule of this.rules) {

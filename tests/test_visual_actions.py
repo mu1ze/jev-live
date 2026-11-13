@@ -94,6 +94,27 @@ class VisualActionBrowserTests(unittest.TestCase):
         p.set_viewport_size({'width':390,'height':844})
         self.assertTrue(p.evaluate('document.documentElement.scrollWidth<=innerWidth'))
 
+    def test_identifier_confirmation_belongs_to_displayed_capture(self):
+        self.page.locator('#labels').fill('bottle')
+        badges=self.page.evaluate("""async () => {
+            const {ActionView}=await import('/action-view.mjs');
+            const view=new ActionView(),items=[{label:'bottle',confidence:.9}];
+            const accept=(captured,now)=>view.accept(items,captured,now,view.generation,.7);
+            const badge=(captured,now)=>{view.identifiers(items,captured,now);return document.querySelector('#target-identifiers').textContent;};
+            accept(100,100);accept(500,500);
+            const initial=badge(500,500);
+            accept(4000,7000); // Displayable semantic capture, too old for confirmation.
+            const delayed=badge(4000,7000);
+            accept(7100,7100);const single=badge(7100,7100);
+            accept(7200,7200);const confirmed=badge(7200,7200);
+            return {initial,delayed,single,confirmed};
+        }""")
+        self.assertIn('Confirmed',badges['initial'])
+        self.assertIn('Recognized',badges['delayed'])
+        self.assertNotIn('Confirmed',badges['delayed'])
+        self.assertNotIn('Confirmed',badges['single'])
+        self.assertIn('Confirmed',badges['confirmed'])
+
     def test_real_http_fixture_normalization_drives_display_only_actions(self):
         p=self.page
         self.answers.update({'target_0_visible':{'type':'noul','noul':.96},'target_0':{'type':'box','confidence':.92,'box':dict(left=.1,right=.6,top=.2,bottom=.8)}})
