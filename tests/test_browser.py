@@ -316,11 +316,11 @@ class BrowserTests(unittest.TestCase):
 
     def test_late_replies_target_changes_errors_and_single_inflight(self):
         import threading
-        harness=server_tests.HTTPTests(); release=threading.Event(); entered=threading.Event(); calls=[]
+        harness=server_tests.HTTPTests(); release=threading.Event(); entered=threading.Event(); fail_next=threading.Event(); calls=[]
         def fixture(req):
             calls.append(json.loads(req.data));entered.set()
             release.wait(3)
-            if len(calls)==3: raise RuntimeError('fixture-secret')
+            if fail_next.is_set(): raise RuntimeError('fixture-secret')
             return {'answers': {'target_0_visible': {'type':'noul','noul':.96},'target_0':{'type':'box','box':{'left':.1,'right':.7,'top':.2,'bottom':.8},'confidence':.88}}}
         with harness.running(transport=fixture), sync_playwright() as pw:
             browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream'])
@@ -339,6 +339,7 @@ class BrowserTests(unittest.TestCase):
             page.locator('#upload').set_input_files({'name':'fixture.png','mimeType':'image/png','buffer':raw})
             page.locator('#analyze').click();page.wait_for_function("() => document.querySelector('#count').textContent === '1'")
             self.assertIn('person',page.locator('.box-label').inner_text())
+            fail_next.set()
             page.locator('#analyze').click();page.locator('#error').wait_for(state='visible')
             self.assertEqual(page.locator('#boxes .box').count(),0)
             self.assertNotIn('fixture-secret',page.locator('#error').inner_text())
