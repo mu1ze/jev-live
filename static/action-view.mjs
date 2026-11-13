@@ -1,4 +1,5 @@
 import {VisualActions, validRule} from './visual-actions.mjs';
+import {ActionAudio} from './action-audio.mjs';
 const $=id=>document.getElementById(id);
 const names={cool:'Underwater / cool',warm:'Warm glow',money:'Money glow',card:'Text card'};
 
@@ -6,6 +7,15 @@ const names={cool:'Underwater / cool',warm:'Warm glow',money:'Money glow',card:'
 export class ActionView {
   constructor() {
     this.rules=[];this.engine=new VisualActions();this.generation=0;this.nextId=1;this.editId=null;this.cardKey='';
+    this.audio=new ActionAudio();
+    $('actions-sound').disabled=!(window.AudioContext||window.webkitAudioContext);
+    if($('actions-sound').disabled)$('actions-sound-hint').textContent='WebAudio unavailable. Visual rules still work.';
+    $('actions-sound').addEventListener('change',async()=>{
+      const requested=$('actions-sound').checked;
+      const ready=await this.audio.allow(requested);
+      if(requested!==$('actions-sound').checked)return;
+      $('actions-sound-hint').textContent=ready?'Sound ready · short chime on opted-in rules only.':'Sound off or paused · toggle to allow again.';
+    });
     $('actions-enabled').addEventListener('change',()=>this.reset());
     document.querySelectorAll('[data-preset]').forEach(button=>button.addEventListener('click',()=>{
       const label=button.dataset.preset, id=`preset-${label}`;
@@ -50,7 +60,7 @@ export class ActionView {
     this.reset();this.renderRules();if(this.editId===id)this.clearEditor();$('rule-label').focus();
   }
   reset() {
-    this.generation++;this.engine.reset();this.present(this.engine.tick(performance.now()));
+    this.audio.cancel();this.generation++;this.engine.reset();this.present(this.engine.tick(performance.now()));
   }
   accept(items,captured,now,generation,threshold) {
     if(generation!==this.generation||!$('actions-enabled').checked||document.hidden)return;
@@ -71,6 +81,7 @@ export class ActionView {
     const message=!$('actions-enabled').checked?'Actions off · preview unchanged':result.active.length?`${result.active.length} active · ${result.active.map(r=>r.label).join(', ')}`:'Armed · waiting for two fresh positive results';
     if($('actions-state').textContent!==message)$('actions-state').textContent=message;
     for(const rule of result.entered)this.log(`${rule.label} → ${names[rule.kind]} activated`);
+    if(result.entered.some(r=>r.sound)&&$('actions-enabled').checked&&$('actions-sound').checked&&!document.hidden)this.audio.play();
     for(const rule of result.exited)this.log(`${rule.label} → cleared (absence or expired evidence)`);
   }
   log(message) {

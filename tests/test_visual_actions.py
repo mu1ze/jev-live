@@ -35,6 +35,36 @@ class VisualActionBrowserTests(unittest.TestCase):
         self.page.evaluate('args=>window.reply(...args)',[[{'label':label,'confidence':confidence,'box':dict(left=.1,right=.6,top=.2,bottom=.8)} for label in labels],status])
         self.page.wait_for_function("() => document.querySelector('#results').getAttribute('aria-busy')==='false'")
 
+    def test_optional_sound_is_gesture_gated_and_cancelled_on_stop(self):
+        p=self.page
+        self.assertTrue(p.locator('#actions-sound').is_enabled(),'sound can be explicitly permitted')
+        p.add_init_script("""
+            window.audioFixture={contexts:0,starts:0,stops:0};
+            const Native=window.AudioContext;
+            window.AudioContext=class extends Native {constructor(){super();window.audioFixture.contexts++;}};
+            const start=OscillatorNode.prototype.start, stop=OscillatorNode.prototype.stop;
+            OscillatorNode.prototype.start=function(...args){window.audioFixture.starts++;return start.apply(this,args);};
+            OscillatorNode.prototype.stop=function(...args){window.audioFixture.stops++;return stop.apply(this,args);};
+        """)
+        p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
+        self.assertEqual(p.evaluate('window.audioFixture.contexts'),0)
+        p.locator('#rule-label').fill('bottle');p.locator('#rule-sound').check();p.locator('#rule-save').click()
+        p.locator('#actions-enabled').check();p.locator('#start').click();self.answer();self.answer()
+        self.assertEqual(p.evaluate('window.audioFixture.starts'),0,'per-rule sound is insufficient without global permission')
+        p.locator('#actions-sound').check()
+        p.wait_for_function("() => document.querySelector('#actions-sound-hint').textContent.includes('ready')")
+        p.locator('#stop').click()
+        if p.evaluate('!!window.reply'):p.evaluate('window.reply([])')
+        p.wait_for_function("() => document.querySelector('#results').getAttribute('aria-busy')==='false'")
+        p.locator('#start').click();self.answer();self.answer()
+        self.assertEqual(p.evaluate('window.audioFixture.starts'),1)
+        p.locator('#stop').click();self.assertGreaterEqual(p.evaluate('window.audioFixture.stops'),1)
+        p.locator('#actions-sound').uncheck()
+        if p.evaluate('!!window.reply'):p.evaluate('window.reply([])')
+        p.wait_for_function("() => document.querySelector('#results').getAttribute('aria-busy')==='false'")
+        p.locator('#start').click();self.answer();self.answer()
+        self.assertEqual(p.evaluate('window.audioFixture.starts'),1)
+
     def test_rule_editor_plain_text_cards_and_safe_presets(self):
         p=self.page
         self.assertEqual(p.locator('#rule-form').count(),1,'accessible rule editor exists')
