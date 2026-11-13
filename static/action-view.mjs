@@ -17,6 +17,8 @@ export class ActionView {
       $('actions-sound-hint').textContent=ready?'Sound ready · short chime on opted-in rules only.':'Sound off or paused · toggle to allow again.';
     });
     $('actions-enabled').addEventListener('change',()=>this.reset());
+    $('reset-actions').addEventListener('click',()=>this.reset());
+    $('clear-action-events').addEventListener('click',()=>$('action-events').replaceChildren());
     document.querySelectorAll('[data-preset]').forEach(button=>button.addEventListener('click',()=>{
       const label=button.dataset.preset, id=`preset-${label}`;
       if(!this.rules.some(r=>r.id===id)&&this.rules.length<12) {
@@ -60,6 +62,7 @@ export class ActionView {
     this.reset();this.renderRules();if(this.editId===id)this.clearEditor();$('rule-label').focus();
   }
   reset() {
+    for(const rule of this.engine.result([],[]).active)this.log(`${rule.label} → cleared (settings or source reset)`);
     this.audio.cancel();this.generation++;this.engine.reset();this.present(this.engine.tick(performance.now()));
   }
   accept(items,captured,now,generation,threshold) {
@@ -85,7 +88,9 @@ export class ActionView {
     for(const rule of result.exited)this.log(`${rule.label} → cleared (absence or expired evidence)`);
   }
   log(message) {
-    const li=document.createElement('li');li.textContent=message;
+    const li=document.createElement('li'), time=document.createElement('time'), now=new Date();
+    time.dateTime=now.toISOString();time.textContent=now.toLocaleTimeString();
+    li.append(time,document.createTextNode(` · ${message}`));
     $('action-events').prepend(li);
     while($('action-events').children.length>40)$('action-events').lastChild.remove();
   }

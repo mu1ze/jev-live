@@ -35,6 +35,51 @@ class VisualActionBrowserTests(unittest.TestCase):
         self.page.evaluate('args=>window.reply(...args)',[[{'label':label,'confidence':confidence,'box':dict(left=.1,right=.6,top=.2,bottom=.8)} for label in labels],status])
         self.page.wait_for_function("() => document.querySelector('#results').getAttribute('aria-busy')==='false'")
 
+    def test_bounded_event_log_reset_and_rule_budget(self):
+        p=self.page
+        self.assertEqual(p.locator('#clear-action-events').count(),1,'local history has an explicit clear control')
+        p.locator('#labels').fill('bottle')
+        for i in range(12):
+            p.locator('#rule-label').fill('bottle');p.locator('#rule-save').click()
+        p.locator('#rule-label').fill('bottle');p.locator('#rule-save').click()
+        self.assertEqual(p.locator('#action-rules li').count(),12)
+        self.assertTrue(p.locator('#rule-error').is_visible())
+        p.locator('#actions-enabled').check();p.locator('#start').click()
+        for cycle in range(3):
+            if cycle:self.answer() # pre-reset capture is never reused
+            self.answer();self.answer()
+            p.wait_for_function("() => document.querySelector('#video').hasAttribute('data-action-filter')")
+            self.assertLessEqual(p.locator('#action-events li').count(),40)
+            self.assertEqual(p.locator('#action-events li time').count(),p.locator('#action-events li').count())
+            p.wait_for_function('() => !!window.reply')
+            p.locator('#reset-actions').click()
+            self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None)
+        self.assertEqual(p.locator('#action-events li').count(),40)
+        p.locator('#clear-action-events').click();self.assertEqual(p.locator('#action-events li').count(),0)
+        self.assertEqual(p.locator('#action-rules li').count(),12,'reset/history clear never delete rules')
+
+    def test_lifecycle_clears_effects_and_rejects_old_replies(self):
+        p=self.page
+        for change in ('hidden','targets','disable','stop','source'):
+            with self.subTest(change=change):
+                p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
+                p.locator('[data-preset="bottle"]').click();p.locator('#actions-enabled').check();p.locator('#start').click()
+                self.answer();self.answer()
+                p.wait_for_function("() => document.querySelector('#video').dataset.actionFilter==='cool'")
+                p.wait_for_function('() => !!window.reply')
+                if change=='hidden':p.evaluate("window.fixtureHidden=true;document.dispatchEvent(new Event('visibilitychange'))")
+                elif change=='targets':p.locator('#labels').fill('wallet')
+                elif change=='disable':p.locator('#actions-enabled').uncheck()
+                elif change=='stop':p.locator('#stop').click()
+                else:
+                    raw=__import__('base64').b64decode(self.harness.payload()['image'])
+                    p.locator('#upload').set_input_files({'name':'fixture.png','mimeType':'image/png','buffer':raw})
+                self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None)
+                self.answer()
+                self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None,'late old-source reply cannot activate')
+                self.assertEqual(p.locator('#photo').get_attribute('data-action-filter'),None)
+                p.locator('#stop').click()
+
     def test_optional_sound_is_gesture_gated_and_cancelled_on_stop(self):
         p=self.page
         self.assertTrue(p.locator('#actions-sound').is_enabled(),'sound can be explicitly permitted')
