@@ -27,6 +27,7 @@ class VisualActionBrowserTests(unittest.TestCase):
         """)
         self.page.goto(f'http://127.0.0.1:{self.harness.port}/')
         self.page.locator('#key').fill('local-fixture-key')
+        self.page.locator('#workflow-mode').select_option('actions')
 
     def tearDown(self):
         self.page.locator('#stop').click()
@@ -41,11 +42,31 @@ class VisualActionBrowserTests(unittest.TestCase):
         # serial request immediately, so aria-busy=false may be too brief to poll.
         self.page.evaluate('() => new Promise(resolve => setTimeout(resolve, 0))')
 
+    def test_workflow_default_tracking_is_exclusive_and_mobile(self):
+        p=self.page
+        p.reload();p.locator('#key').fill('local-fixture-key')
+        self.assertEqual(p.locator('#workflow-mode').input_value(),'tracking')
+        self.assertFalse(p.locator('.visual-actions').is_visible())
+        self.assertTrue(p.locator('#tracking-details').is_visible())
+        # Even retained opt-in and tab rules cannot execute in tracking workflow.
+        p.evaluate("document.querySelector('[data-preset=bottle]').click();document.querySelector('#actions-enabled').checked=true")
+        p.locator('#labels').fill('bottle');p.locator('#start').click()
+        self.answer();self.answer()
+        self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None)
+        p.locator('#workflow-mode').select_option('actions')
+        self.assertTrue(p.locator('.visual-actions').is_visible())
+        self.assertFalse(p.locator('#tracking-details').is_visible())
+        self.assertFalse(p.locator('#box-legend').is_visible())
+        self.assertTrue(p.locator('#actions-enabled').is_checked())
+        self.assertIn('recognition only',p.locator('#workflow-description').inner_text())
+        p.set_viewport_size({'width':390,'height':844})
+        self.assertTrue(p.evaluate('document.documentElement.scrollWidth<=innerWidth'))
+
     def test_both_modes_capture_confirmed_absence_and_return_cycles(self):
         p=self.page
         for mode in ('toggle','present'):
             with self.subTest(mode=mode):
-                p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
+                p.reload();p.locator('#workflow-mode').select_option('actions');p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
                 p.locator('#rule-label').fill('bottle');p.locator('#rule-mode').select_option(mode);p.locator('#rule-save').click()
                 p.locator('#actions-enabled').check();p.locator('#start').click()
                 for _ in range(2):
@@ -167,7 +188,7 @@ class VisualActionBrowserTests(unittest.TestCase):
         """)
         for reset in ('stop','hidden','disable'):
             with self.subTest(reset=reset):
-                p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
+                p.reload();p.locator('#workflow-mode').select_option('actions');p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
                 p.locator('#rule-label').fill('bottle');p.locator('#rule-sound').check();p.locator('#rule-save').click()
                 p.locator('#actions-enabled').check();p.locator('#start').click();self.answer()
                 p.locator('#actions-sound').check();p.wait_for_function('() => !!window.releaseAudio')
@@ -232,7 +253,7 @@ class VisualActionBrowserTests(unittest.TestCase):
         p=self.page
         for mode,change in __import__('itertools').product(('toggle','present'),('hidden','targets','confidence','disable','stop','source','edit','reset')):
             with self.subTest(mode=mode,change=change):
-                p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
+                p.reload();p.locator('#workflow-mode').select_option('actions');p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
                 p.locator('#rule-label').fill('bottle');p.locator('#rule-mode').select_option(mode);p.locator('#rule-save').click()
                 p.locator('#actions-enabled').check();p.locator('#start').click()
                 self.answer();self.answer()
@@ -270,7 +291,7 @@ class VisualActionBrowserTests(unittest.TestCase):
             OscillatorNode.prototype.start=function(...args){window.audioFixture.starts++;return start.apply(this,args);};
             OscillatorNode.prototype.stop=function(...args){window.audioFixture.stops++;return stop.apply(this,args);};
         """)
-        p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
+        p.reload();p.locator('#workflow-mode').select_option('actions');p.locator('#key').fill('local-fixture-key');p.locator('#labels').fill('bottle')
         self.assertEqual(p.evaluate('window.audioFixture.contexts'),0)
         p.locator('#rule-label').fill('bottle');p.locator('#rule-sound').check();p.locator('#rule-save').click()
         p.locator('#actions-enabled').check();p.locator('#start').click();self.answer();self.answer()

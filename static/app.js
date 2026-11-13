@@ -5,6 +5,13 @@ const actions=new ActionView();
 
 const $ = id => document.getElementById(id);
 const video=$('video'), photo=$('photo'), stage=$('stage');
+const actionMode=()=>$('workflow-mode').value==='actions';
+function workflowUI() {
+  const active=actionMode();
+  document.querySelector('.visual-actions').hidden=!active;
+  document.querySelectorAll('.tracking-details').forEach(node=>node.hidden=active);
+  text('workflow-description',active?'Actions · image recognition only. Native preview and optional local reactions; no pixel tracking or box overlays.':'Detection and local pixel tracking · measured boxes between recognition requests. Actions do not run.');
+}
 const frame=new FrameState(4000), rate=new CompletionRate(5000);
 let running=false, pending=false, timer=null, stream=null, uploaded=null, photoURL=null;
 let sourceWidth=1, sourceHeight=1, serverKey=false, lastCapture=null, geometryCutoff=0;
@@ -145,7 +152,7 @@ async function detect(single) {
     failures=0; retryAt=0;
     if(epoch!==frame.epoch) return;
     const now=performance.now();
-    actions.accept(data.detections,captured,now,actionGeneration,Number($('confidence').value));
+    if(actionMode())actions.accept(data.detections,captured,now,actionGeneration,Number($('confidence').value));
     if(!single) rate.record(now);
     $('latency').textContent=`${((now-requestStarted)/1000).toFixed(2)} s`;
     if(frame.accept(epoch,data.detections,captured,now)) {
@@ -259,6 +266,8 @@ function render() {
   }
 }
 $('tracking-details').parentElement.addEventListener('toggle',()=>render());
+$('workflow-mode').addEventListener('change',()=>{reset();workflowUI();if(running&&!pending)schedule();render();});
+workflowUI();
 $('start').addEventListener('click',start);
 $('stop').addEventListener('click',stop);
 $('upload').addEventListener('change',upload);

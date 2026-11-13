@@ -71,7 +71,7 @@ export class ActionView {
     if(generation!==this.generation||document.hidden)return;
     this.targets.rules=$('labels').value.split(',').map(s=>s.trim()).filter(Boolean).map(label=>({id:label,label,mode:'present'}));
     this.targets.accept(items,captured,now,threshold);
-    if(!$('actions-enabled').checked)return;
+    if($('workflow-mode').value!=='actions'||!$('actions-enabled').checked)return;
     this.present(this.engine.accept(items,captured,now,threshold));
   }
   tick(now) { this.present(this.engine.tick(now)); }
