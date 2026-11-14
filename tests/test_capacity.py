@@ -23,8 +23,8 @@ class CapacityTests(unittest.TestCase):
             return {'answers':answers}
         camera = """
         window.trace={seeds:[],frames:[],inputs:[]};
-        const encode=HTMLCanvasElement.prototype.toDataURL;
-        HTMLCanvasElement.prototype.toDataURL=function(...args){trace.semanticCapture=performance.now();const until=performance.now()+20;while(performance.now()<until){}return encode.apply(this,args);};
+        const encode=HTMLCanvasElement.prototype.toBlob;
+        HTMLCanvasElement.prototype.toBlob=function(...args){trace.semanticCapture=performance.now();const until=performance.now()+20;while(performance.now()<until){}return encode.apply(this,args);};
         const NativeWorker=Worker;
         window.Worker=class extends NativeWorker {
             constructor(...args){super(...args);this.addEventListener('message',e=>{

@@ -144,7 +144,7 @@ class VisualActionBrowserTests(unittest.TestCase):
         self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),None)
         self.assertEqual(p.locator('.box').count(),0,'no prior geometry on return')
         p.wait_for_function('(previous) => workers.filter(w=>w.active).length===1 && framePosts>previous+2',arg=posts)
-        self.assertEqual(p.evaluate('[callbacks.size,samplers.size]'),[1,1],'exactly one resumed sampling loop')
+        self.assertEqual(p.evaluate('[callbacks.size,samplers.size]'),[1,0],'exactly one resumed frame-callback loop; no 20 ms poll')
         self.assertEqual(p.evaluate('requests.starts'),starts)
         self.answer();self.assertEqual(p.locator('#count').inner_text(),'0')
         self.answer()

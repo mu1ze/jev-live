@@ -333,7 +333,9 @@ class BrowserTests(unittest.TestCase):
             self.assertEqual(len(calls),1)
             release.set()
             page.wait_for_timeout(400)
-            self.assertEqual(page.locator('#boxes .box').count(),0)
+            # The late 'mug' reply must never revive an overlay. A fresh 'person'
+            # result from the restarted camera may legitimately be visible.
+            self.assertFalse(any('mug' in label for label in page.locator('#boxes .box').all_inner_texts()))
             page.locator('#stop').click()
             raw=__import__('base64').b64decode(harness.payload()['image'])
             page.locator('#upload').set_input_files({'name':'fixture.png','mimeType':'image/png','buffer':raw})

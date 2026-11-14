@@ -47,7 +47,7 @@ When `APP_ACCESS_TOKEN` is set, open your private URL:
 https://YOUR-PRIVATE-HOST/jev-live/?access=YOUR_ACCESS_TOKEN
 ```
 
-The app uses constant-time token comparison, issues an 8-hour HttpOnly `SameSite=Strict` signed session cookie, and redirects to `/jev-live/` **without the query string**. Cookies receive `Secure` behind the trusted HTTPS proxy. Sessions expire after eight hours or a server restart. Treat access links as secrets: browser history and the proxy can see the initial URL. The app never logs request paths, query strings, request bodies, upstream errors, or keys; configure your reverse proxy not to log secret query strings either. Do not paste access links into public channels.
+The app uses constant-time token comparison, issues an 8-hour HttpOnly `SameSite=Lax` signed session cookie (Lax, not Strict, so an access link clicked from chat, email or another site still logs in; cross-site POSTs are rejected by the exact-Origin check below), and redirects to `/jev-live/` **without the query string**. Cookies receive `Secure` behind the trusted HTTPS proxy. Sessions expire after eight hours or a server restart. Treat access links as secrets: browser history and the proxy can see the initial URL. The app never logs request paths, query strings, request bodies, upstream errors, or keys; configure your reverse proxy not to log secret query strings either. Do not paste access links into public channels.
 
 ### Trusted forwarding and CSRF
 
@@ -85,8 +85,29 @@ The tracking details below apply only to Detection / Tracking. Both workflows
 retain one request in flight, cadence/backoff, capture-time semantic freshness
 and the same authenticated gateway; there are no separate routes or apps.
 
+### Efficiency shared by both workflows
+
+- **Warm upstream connection.** The gateway keeps a small keep-alive pool to the
+  fixed TypeSafe host instead of opening a new TCP + TLS connection per request
+  (urllib always sent `Connection: close`). From this sandbox, an
+  unauthenticated probe measured about 55 ms per request on a fresh connection
+  and about 17 ms on a warm one. That is network overhead only, not model
+  latency. Idle connections are dropped after 20 s. A request is retried once
+  only if a *reused* idle connection was closed by the peer before any reply.
+  Non-200 replies, oversize bodies and peer-closed connections are never pooled.
+- **Off-main-thread JPEG encoding.** Each snapshot uses `canvas.toBlob`, which
+  copies the pixels synchronously at capture time and encodes them off the main
+  thread. Native preview and pixel sampling no longer stall on encoding. A
+  frame still encoding when Stop, a source change or a target edit happens is
+  never sent.
+- **Cached static assets.** Assets are served from memory with strong ETags and
+  `Cache-Control: private, no-cache`. Browsers revalidate with a body-less 304.
+  Large text assets are gzipped once (OpenCV 10.5 MB → 3.4 MB). Starting the
+  camera again, or switching back to Detection / Tracking, no longer
+  re-downloads OpenCV. API responses remain `no-store`.
+
 - Smooth native video preview runs independently of requests. Detection does **not** run at video frame rate.
-- Camera boxes use unique track IDs and measured pixel motion, not coordinate interpolation. Local sampling adapts to measured worker turnaround with 35% headroom: a 33ms floor (about 30 Hz when source/CPU permit) and 160ms scheduling ceiling, independently of serial Jev requests. One worker frame is in flight; no pixels queue behind it, and the next submission reads the latest image. Tracked boxes survive weak/missing Jev results only while current visual evidence supports them. Snapshot-only fallback is explicitly labeled if tracking cannot initialize; still-image analysis remains snapshot-only.
+- Camera boxes use unique track IDs and measured pixel motion, not coordinate interpolation. Local sampling adapts to measured worker turnaround with 35% headroom: a 33ms floor (about 30 Hz when source/CPU permit) and 160ms scheduling ceiling, independently of serial Jev requests. One worker frame is in flight; no pixels queue behind it, and the next submission reads the latest image. Sampling is driven by `requestVideoFrameCallback` and by each worker reply, with one timer per due cadence slot. A 20 ms polling interval runs only in browsers without frame callbacks. The capture canvas is `willReadFrequently`, avoiding a GPU readback stall on each pixel read. Tracked boxes survive weak/missing Jev results only while current visual evidence supports them. Snapshot-only fallback is explicitly labeled if tracking cannot initialize; still-image analysis remains snapshot-only.
 - Changed-only DOM updates, stable-width telemetry and one reusable capture canvas remain. The earlier eight-result snapshot-rendering benchmark (8/7 box additions/removals reduced to 1/0) describes the snapshot architecture, not a performance or accuracy claim for tracking.
 - Default target: **4 Hz** (250 ms capture-to-capture minimum). Choices: Auto (continuous serial), 4 Hz, 2 Hz, 1 Hz, or economy 0.2 Hz. A request slower than the target interval is followed immediately by the next; there is no extra fixed pause. One browser request remains in flight at a time. Actual completed detections/sec is measured separately from the selected target; latency, target count and provider limits may lower it. API/network errors trigger exponential retry backoff starting at 3 seconds (maximum 30 seconds). Hidden tabs pause new snapshots and resume when visible.
 - Up to 24 targets means up to 48 questions per request: one `noul` presence question and one `box` question per target. More targets, larger images and faster cadence cost more. Multiple browser tabs can issue independent requests.
@@ -231,7 +252,7 @@ Machine-readable ignored artifacts: `artifacts/stability-baseline.json`, `artifa
 {"key":"OPTIONAL_IF_ENV_CONFIGURED","labels":["coffee mug"],"format":"jpg","image":"STANDARD_BASE64_NO_DATA_PREFIX"}
 ```
 
-The server permits only the fixed HTTPS endpoint `https://api.typesafe.ai/v1/systemone`, disables HTTP redirects, and sends:
+The server permits only the fixed HTTPS endpoint `https://api.typesafe.ai/v1/systemone`, never follows HTTP redirects, reuses keep-alive connections, and sends:
 
 - `Authorization: Bearer ***`
 - `TypeSafe-Danger-Zone-Images: true`

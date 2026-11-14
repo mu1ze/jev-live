@@ -88,7 +88,143 @@ def validate_image(encoded, fmt):
         raise ValueError()
 
 
-def create_server(port=8788, api_key='', access_token='', prefix='', transport=None, public_prefix=None):
+UPSTREAM_HOST = 'api.typesafe.ai'
+UPSTREAM_PATH = '/v1/systemone'
+UPSTREAM_LIMIT = 262144
+
+
+class UpstreamStatusError(Exception):
+    """Non-200 upstream reply; its body is never surfaced."""
+
+
+class UpstreamPool:
+    """Bounded keep-alive pool for the single fixed upstream.
+
+    urllib sends ``Connection: close`` so every detection used to pay a fresh
+    TCP + TLS handshake. Reusing a warm connection removes that from each
+    serial request. Redirects are never followed (http.client has no redirect
+    support). A request is retried once only when a *reused* idle connection
+    turns out to have been closed by the peer before any reply byte arrived.
+    """
+
+    RETRYABLE = (ConnectionResetError, BrokenPipeError)
+
+    def __init__(self, factory, size=4, idle_seconds=20.0):
+        import threading
+        self.factory, self.size, self.idle_seconds = factory, size, idle_seconds
+        self.lock = threading.Lock()
+        self.free = []
+        self.opened = 0
+
+    def _acquire(self):
+        import time
+        with self.lock:
+            while self.free:
+                conn, released = self.free.pop()
+                if time.monotonic() - released < self.idle_seconds:
+                    return conn, True
+                conn.close()
+            self.opened += 1
+        return self.factory(), False
+
+    def _release(self, conn):
+        import time
+        with self.lock:
+            if len(self.free) < self.size:
+                self.free.append((conn, time.monotonic()))
+                return
+        conn.close()
+
+    def close(self):
+        with self.lock:
+            free, self.free = self.free, []
+        for conn, _ in free:
+            conn.close()
+
+    def post(self, body, headers):
+        import http.client
+        for attempt in (0, 1):
+            conn, reused = self._acquire()
+            try:
+                conn.request('POST', UPSTREAM_PATH, body=body, headers=headers)
+                response = conn.getresponse()
+            except (http.client.RemoteDisconnected, *self.RETRYABLE):
+                conn.close()
+                if reused and attempt == 0:
+                    continue
+                raise
+            except BaseException:
+                conn.close()
+                raise
+            try:
+                if response.status != 200:
+                    raise UpstreamStatusError()
+                raw = response.read(UPSTREAM_LIMIT + 1)
+                if len(raw) > UPSTREAM_LIMIT:
+                    raise ValueError()
+            except BaseException:
+                conn.close()
+                raise
+            # Only a fully consumed keep-alive reply leaves the socket reusable.
+            if response.will_close or not response.isclosed():
+                conn.close()
+            else:
+                self._release(conn)
+            return json.loads(raw)
+
+
+def default_upstream_connection():
+    import http.client
+    # Certificate verification uses the default trusted context.
+    return http.client.HTTPSConnection(UPSTREAM_HOST, timeout=25)
+
+
+class StaticCache:
+    """In-memory static assets with strong ETags and optional gzip.
+
+    Assets are re-read only when their mtime/size change. Responses are
+    ``private, no-cache``: browsers revalidate every use (304, no body), so a
+    restart of the tracking worker no longer re-downloads 11 MB of OpenCV.
+    """
+
+    COMPRESSIBLE = ('text/', 'application/json')
+
+    def __init__(self, root):
+        import threading
+        self.root, self.entries, self.lock = root, {}, threading.Lock()
+
+    def get(self, filename, mime):
+        import gzip
+        import hashlib
+        path = self.root / filename
+        stat = path.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        with self.lock:
+            entry = self.entries.get(filename)
+            if entry and entry['stamp'] == stamp:
+                return entry
+        body = path.read_bytes()
+        tag = hashlib.sha256(body).hexdigest()[:24]
+        entry = {'stamp': stamp, 'body': body, 'etag': f'"{tag}"', 'gzip': None, 'gzip_etag': f'"{tag}-gz"'}
+        if len(body) > 1024 and mime.startswith(self.COMPRESSIBLE):
+            packed = gzip.compress(body, 6, mtime=0)
+            if len(packed) < len(body) * 0.9:
+                entry['gzip'] = packed
+        with self.lock:
+            self.entries[filename] = entry
+        return entry
+
+
+def accepts_gzip(header):
+    for part in (header or '').split(','):
+        name, _, params = part.strip().partition(';')
+        if name.strip().lower() in ('gzip', '*'):
+            q = params.strip()
+            return not (q.startswith('q=') and q[2:].strip() in ('0', '0.0', '0.00', '0.000'))
+    return False
+
+
+def create_server(port=8788, api_key='', access_token='', prefix='', transport=None, public_prefix=None, upstream_factory=None):
     import hashlib
     import hmac
     import secrets
@@ -100,6 +236,10 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
     if any(not re.fullmatch(r'(?:/[A-Za-z0-9_-]+)*', value) for value in (prefix, public_prefix)):
         raise ValueError('Mount prefixes must contain simple path segments.')
     signing_key = secrets.token_bytes(32)
+    from pathlib import Path
+    static_cache = StaticCache(Path(__file__).parent / 'static')
+    # Test callers may inject a plain-HTTP connection factory; never via HTTP/env/CLI.
+    upstream = UpstreamPool(upstream_factory or default_upstream_connection)
 
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
@@ -146,7 +286,7 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                 stamp = str(int(time.time()))
                 signature = hmac.new(signing_key, stamp.encode(), hashlib.sha256).hexdigest()
                 self.send_response(303)
-                self.send_header('Set-Cookie', f'jev_session={stamp}.{signature}; Path={public_prefix}/; HttpOnly; SameSite=Strict; Max-Age=28800' + ('; Secure' if self.secure_proxy() else ''))
+                self.send_header('Set-Cookie', f'jev_session={stamp}.{signature}; Path={public_prefix}/; HttpOnly; SameSite=Lax; Max-Age=28800' + ('; Secure' if self.secure_proxy() else ''))
                 self.send_header('Location', public_prefix + '/')
                 self.send_header('Cache-Control', 'no-store')
                 self.send_header('Content-Length', '0')
@@ -170,15 +310,29 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                 static_routes['/trackingvendor/' + name] = ('trackingvendor/' + name, 'text/javascript' if name.endswith('.js') else 'text/plain')
             route = parsed.path[len(prefix):] if parsed.path.startswith(prefix + '/') else None
             if route in static_routes:
-                from pathlib import Path
                 filename, mime = static_routes[route]
-                body = (Path(__file__).parent / 'static' / filename).read_bytes()
-                self.send_response(200)
+                entry = static_cache.get(filename, mime)
+                packed = entry['gzip'] is not None and accepts_gzip(self.headers.get('Accept-Encoding'))
+                body, etag = (entry['gzip'], entry['gzip_etag']) if packed else (entry['body'], entry['etag'])
+                matches = [tag.strip().removeprefix('W/') for tag in self.headers.get('If-None-Match', '').split(',')]
+                fresh = etag in matches or '*' in matches
+                self.send_response(304 if fresh else 200)
                 self.send_header('Content-Type', mime)
+                self.send_header('ETag', etag)
+                self.send_header('Cache-Control', 'private, no-cache')
+                if entry['gzip'] is not None:
+                    self.send_header('Vary', 'Accept-Encoding')
+                if packed:
+                    self.send_header('Content-Encoding', 'gzip')
+                if fresh:
+                    self.end_headers()
+                    return
                 self.send_header('Content-Length', str(len(body)))
-                self.send_header('Cache-Control', 'no-store')
                 self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    self.close_connection = True  # e.g. worker terminated mid-download
                 return
             self.send_json(404, {'error': 'Not found.'})
 
@@ -249,24 +403,19 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                 questions[f'target_{i}_visible'] = {'type': 'noul', 'instructions': f'Is there a {label} in `photo`?'}
                 questions[f'target_{i}'] = {'type': 'box', 'instructions': f'the {label} in `photo`'}
             payload = {'model': 'jev-1.14.0', 'state': {'photo': ref}, 'assets': {ref: {'type': 'image', 'format': body['format'], 'data_base64': body['image']}}, 'questions': questions}
-            req = Request('https://api.typesafe.ai/v1/systemone', data=json.dumps(payload).encode(), headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json', 'TypeSafe-Danger-Zone-Images': 'true'})
+            data = json.dumps(payload).encode()
+            headers = {'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json', 'TypeSafe-Danger-Zone-Images': 'true'}
             try:
                 if transport:
-                    answer = transport(req)  # Test injection; not configurable through HTTP/env.
+                    # Test injection; not configurable through HTTP/env.
+                    answer = transport(Request(f'https://{UPSTREAM_HOST}{UPSTREAM_PATH}', data=data, headers=headers))
                 else:
-                    from urllib.request import build_opener, HTTPRedirectHandler
-                    class NoRedirect(HTTPRedirectHandler):
-                        def redirect_request(self, *args, **kwargs):
-                            return None
-                    with build_opener(NoRedirect).open(req, timeout=25) as response:
-                        raw = response.read(262145)
-                        if len(raw) > 262144:
-                            raise ValueError()
-                        answer = json.loads(raw)
+                    answer = upstream.post(data, headers)
                 if not isinstance(answer.get('answers'), dict):
                     raise ValueError()
-            except HTTPError as error:
-                error.close()
+            except (HTTPError, UpstreamStatusError) as error:
+                if isinstance(error, HTTPError):
+                    error.close()
                 self.send_json(502, {'error': 'Jev request failed. Check your key, quota and image.'})
                 return
             except URLError as error:
@@ -277,6 +426,9 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                 return
             except TimeoutError:
                 self.send_json(504, {'error': 'Jev request timed out. Try a slower cadence.'})
+                return
+            except OSError:
+                self.send_json(502, {'error': 'Could not connect to Jev. Try again later.'})
                 return
             except Exception:
                 self.send_json(502, {'error': 'Jev request failed. Check your key, quota and image.'})
@@ -301,7 +453,15 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                 except (KeyError, TypeError):
                     continue
             self.send_json(200, {'detections': detections})
-    return ThreadingHTTPServer(('127.0.0.1', port), Handler)
+
+    class Server(ThreadingHTTPServer):
+        def server_close(self):
+            super().server_close()
+            upstream.close()
+
+    server = Server(('127.0.0.1', port), Handler)
+    server.upstream = upstream
+    return server
 
 
 if __name__ == '__main__':

@@ -129,7 +129,7 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(status, 303)
             self.assertEqual(headers['Location'], '/jev-live/')
             self.assertIn('HttpOnly', headers['Set-Cookie'])
-            self.assertIn('SameSite=Strict', headers['Set-Cookie'])
+            self.assertIn('SameSite=Lax', headers['Set-Cookie'])
             self.assertIn('Path=/jev-live/', headers['Set-Cookie'])
             cookie = headers['Set-Cookie'].split(';')[0]
             self.assertEqual(self.request('GET', '/jev-live/api/config', headers={'Cookie': cookie})[0], 200)

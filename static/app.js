@@ -19,7 +19,10 @@ const frame=new FrameState(4000), rate=new CompletionRate(5000);
 let running=false, pending=false, timer=null, stream=null, uploaded=null, photoURL=null;
 let sourceWidth=1, sourceHeight=1, serverKey=false, lastCapture=null, geometryCutoff=0;
 const boxNodes=new Map();
-const tracking=new TrackingClient(reason=>{if(reason==='failure')geometryCutoff=Math.max(geometryCutoff,frame.captured);if(running)render();});
+// A finished worker frame immediately submits the newest presented frame, so no
+// polling timer is needed to notice the worker became free.
+const tracking=new TrackingClient(reason=>{if(reason==='failure')geometryCutoff=Math.max(geometryCutoff,frame.captured);if(running){render();if(reason==='frame'||reason==='ready')sample();}});
+let samplingActive=false, sampleRetry=null;
 let sampleTimer=null, lastSample=0, lastVideoFrame=-1, presentedFrame=0, videoCallback=null;
 let lastTrackingCapture=null, qualityFrame=-1, qualityChanged=0;
 // Prefer actual presented frames; older MediaStream implementations may expose
@@ -77,12 +80,15 @@ function credentials() {
 function updateButtons() { $('start').disabled=running; $('analyze').disabled=!uploaded || pending || running; }
 function stopTracking() {
   if(videoCallback!==null)video.cancelVideoFrameCallback?.(videoCallback);
-  videoCallback=null;
-  clearInterval(sampleTimer);sampleTimer=null;tracking.close();
+  videoCallback=null;samplingActive=false;
+  clearInterval(sampleTimer);sampleTimer=null;clearTimeout(sampleRetry);sampleRetry=null;tracking.close();
 }
 function startTracking() {
-  if(actionMode()||!running||!stream||sampleTimer!==null)return;
-  watchVideo();tracking.start();sampleTimer=setInterval(sample,20);
+  if(actionMode()||!running||!stream||samplingActive)return;
+  samplingActive=true;watchVideo();tracking.start();
+  // Presented-frame callbacks and worker replies drive sampling. A 20 ms poll is
+  // only needed by browsers without requestVideoFrameCallback.
+  if(typeof video.requestVideoFrameCallback!=='function')sampleTimer=setInterval(sample,20);
 }
 function stop() {
   running=false;stopTracking();reset(); $('results').setAttribute('aria-busy','false');
@@ -94,10 +100,22 @@ function stop() {
   status('Stopped'); clearError(); updateButtons();
 }
 const snapshotCanvas=document.createElement('canvas');
-const snapshotContext=snapshotCanvas.getContext('2d');
-function snapshot(source,w,h) {
-  drawSnapshot(source,w,h);
-  return snapshotCanvas.toDataURL('image/jpeg',.82).split(',')[1];
+// Tracking reads these pixels back up to 30 times a second; a CPU-backed canvas
+// avoids a GPU readback stall on every getImageData.
+const snapshotContext=snapshotCanvas.getContext('2d',{willReadFrequently:true});
+const encodeError=()=>new Error('Could not encode the camera frame. Try again.');
+function encodeSnapshot() {
+  // toBlob copies the current pixels synchronously, then JPEG-encodes off the
+  // main thread, so the preview and pixel sampling never stall on encoding.
+  const encoded=new Promise((resolve,reject)=>snapshotCanvas.toBlob(blob=>{
+    if(!blob){reject(encodeError());return;}
+    const reader=new FileReader();
+    reader.onload=()=>resolve(reader.result.slice(reader.result.indexOf(',')+1));
+    reader.onerror=()=>reject(encodeError());
+    reader.readAsDataURL(blob);
+  },'image/jpeg',.82));
+  encoded.catch(()=>{}); // awaited by the request; never an unhandled rejection
+  return encoded;
 }
 function drawSnapshot(source,w,h) {
   const size=snapshotSize(w,h);
@@ -109,7 +127,10 @@ function sample() {
   if(actionMode()||!running||document.hidden||!tracking.ready||tracking.busy||video.readyState<2)return;
   const now=performance.now();
   const mediaFrame=videoFrame(now);
-  if(now-lastSample+1<tracking.sampleInterval()||mediaFrame===null||mediaFrame===lastVideoFrame)return;
+  if(mediaFrame===null||mediaFrame===lastVideoFrame)return;
+  const wait=tracking.sampleInterval()-(now-lastSample+1);
+  // Too soon for the adaptive cadence: wake once when it is due instead of polling.
+  if(wait>0){if(sampleRetry===null)sampleRetry=setTimeout(()=>{sampleRetry=null;sample();},wait);return;}
   try {drawSnapshot(video,video.videoWidth,video.videoHeight);trackingFrame(now);}
   catch {tracking.failure();}
 }
@@ -124,7 +145,7 @@ async function detect(single) {
   if(pending || (!single && (!running || document.hidden))) return;
   if(!single && performance.now()<retryAt) {schedule();return;}
   const epoch=frame.epoch, actionGeneration=actions.generation;
-  let payload,capture=null,captured;
+  let payload,capture=null,captured,encoded,timeout;
   try {
     payload=credentials();
     if(!single && video.readyState<2) { schedule(); return; }
@@ -136,10 +157,10 @@ async function detect(single) {
     // paired with an unrelated/throttled capture ID. Never wait for the worker.
     if(!actionMode()&&!single&&tracking.ready&&lastTrackingCapture?.generation===tracking.generation&&captured-lastTrackingCapture.timestamp<350) {
       capture=lastTrackingCapture;captured=capture.timestamp;
-      payload.image=snapshotCanvas.toDataURL('image/jpeg',.82).split(',')[1];
+      encoded=encodeSnapshot();
     } else {
       lastTrackingCapture=null;
-      payload.image=snapshot(source,sourceWidth,sourceHeight);
+      drawSnapshot(source,sourceWidth,sourceHeight);encoded=encodeSnapshot();
       if(!actionMode()&&!single&&tracking.ready&&!tracking.busy) {
         capture=tracking.push(snapshotCanvas,snapshotContext,captured);
         if(capture){lastSample=captured;lastVideoFrame=videoFrame(captured);lastTrackingCapture=capture;}
@@ -147,14 +168,17 @@ async function detect(single) {
     }
     payload.format='jpg';
   } catch(e) { backoff(); fail(e.message); schedule(); return; }
-  const requestStarted=performance.now();
-  lastCapture=requestStarted;
+  lastCapture=performance.now();
   pending=true; updateButtons(); clearError(); $('results').setAttribute('aria-busy','true');
   if(single) {status('Asking Jev…','busy');text('stage-note','ANALYZING SELECTED IMAGE');}
   else liveStatus();
   const controller=new AbortController();
-  const timeout=setTimeout(()=>controller.abort(),28000);
   try {
+    payload.image=await encoded;
+    // Stop, source or target changes during encoding: never send that frame.
+    if(epoch!==frame.epoch||(!single&&!running))return;
+    const requestStarted=performance.now();
+    timeout=setTimeout(()=>controller.abort(),28000);
     const response=await fetch('api/detect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal,credentials:'same-origin',cache:'no-store'});
     const data=await response.json();
     if(!response.ok) throw new Error(data.error || 'Detection failed. Please try again.');

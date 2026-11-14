@@ -24,7 +24,7 @@ export class TrackingClient {
       worker.onmessageerror=()=>{if(worker===this.worker)this.failure('worker-message-error');};
       worker.onmessage=({data:m})=>{
         if(worker!==this.worker)return;
-        if(m.type==='ready'){clearTimeout(this.loadTimer);this.ready=true;this.state='pixel tracker ready';this.onchange();return;}
+        if(m.type==='ready'){clearTimeout(this.loadTimer);this.ready=true;this.state='pixel tracker ready';this.onchange('ready');return;}
         if(m.type==='failure'){
           if(m.generation!==undefined&&m.generation!==this.generation)return;
           const code=['frame-processing-error','seed-replay-error','reset-error'].includes(m.code)?m.code:'worker-processing-error';
@@ -48,7 +48,7 @@ export class TrackingClient {
           for(const [label,cutoff] of this.lossCutoffs)if(now-cutoff>=350)this.lossCutoffs.delete(label);
           this.tracks=m.tracks;this.lastMeasured=m.measured||0;if(this.tracks.length)this.engaged=true;
           this.state=this.tracks.length?'measured pixel tracking':'no supported pixel tracks · snapshot detection';
-          this.onchange();
+          this.onchange(m.type);
         }
       };
     } catch(e) {this.failure('worker-construction-error',this.errorDetail(e));}
