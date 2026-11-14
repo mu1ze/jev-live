@@ -121,13 +121,18 @@ and the same authenticated gateway; there are no separate routes or apps.
 ## Visual Actions (first version)
 
 **Off by default, available only in the Actions workflow.** Select **Actions** in
-Workflow, then in the Visual Actions panel add a preset or create a rule, add
-its **exact, case-sensitive label** to Choose your targets, then turn on **Enable
-actions** and Start camera. Bottle adds an underwater/cool display filter, wallet
-a celebratory green money glow, and lighter a warm glow. Presets add rules only;
-they never replace targets, start a camera, or change your update rate. An
-unconfigured target is explicitly marked. Reapplying a preset does not duplicate
-or overwrite an edited rule. Edit/Delete and a custom plain-text card are supported.
+Workflow, then in the Visual Actions panel add a preset or create a rule. Its
+**exact, case-sensitive label** is appended to Choose your targets automatically
+if it is missing. Turn on **Enable actions** and Start camera. Bottle adds an
+underwater/cool display filter, wallet a celebratory green money glow, and lighter
+a warm glow. Adding or editing a rule only *appends* its label: existing targets
+are never replaced or removed, and no camera starts. Deleting a rule leaves its
+target in place. If 24 targets are already set, the rule is still saved and a
+message asks you to free a target. As with typing, the appended target resets
+active effects and is used from the next recognition request. A rule whose label
+is not a current target is explicitly marked. Reapplying a preset does not
+duplicate or overwrite an edited rule. Edit/Delete and a custom plain-text card
+are supported.
 
 - At most **12 rules**, labels up to 80 characters and card messages up to 240.
   The earliest active filter in rule-list order wins; all active text cards can

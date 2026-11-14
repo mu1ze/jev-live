@@ -482,7 +482,7 @@ class VisualActionBrowserTests(unittest.TestCase):
         for preset in ('bottle','wallet','lighter','bottle'):
             p.locator(f'[data-preset="{preset}"]').click()
         self.assertEqual(p.locator('#action-rules li').count(),3,'preset buttons are idempotent')
-        self.assertEqual(p.locator('#labels').input_value(),'coffee mug, person')
+        self.assertEqual(p.locator('#labels').input_value(),'coffee mug, person, bottle, wallet, lighter','presets append each label once')
         p.locator('#labels').fill('bottle, wallet, lighter')
         p.locator('#rule-label').fill('wallet')
         p.locator('#rule-kind').select_option('card')
@@ -514,14 +514,45 @@ class VisualActionBrowserTests(unittest.TestCase):
         p.emulate_media(reduced_motion='reduce')
         self.assertEqual(p.locator('#action-cards').evaluate('n=>getComputedStyle(n).animationName'),'none')
 
+    def test_adding_rules_appends_exact_labels_to_targets(self):
+        p=self.page
+        p.locator('#labels').fill('Bottle,  coffee mug')
+        p.locator('#rule-label').fill('bottle');p.locator('#rule-kind').select_option('warm');p.locator('#rule-save').click()
+        self.assertEqual(p.locator('#labels').input_value(),'Bottle, coffee mug, bottle','exact, case-sensitive label appended')
+        self.assertIn('Target configured',p.locator('#action-rules').inner_text())
+        p.locator('#rule-label').fill('coffee mug');p.locator('#rule-save').click()
+        self.assertEqual(p.locator('#labels').input_value(),'Bottle, coffee mug, bottle','existing target is not duplicated')
+        p.locator('#action-rules li').first.get_by_role('button',name='Edit').click()
+        p.locator('#rule-label').fill('red wallet');p.locator('#rule-save').click()
+        self.assertEqual(p.locator('#labels').input_value(),'Bottle, coffee mug, bottle, red wallet','edited label appended; old target kept')
+        p.locator('#action-rules li').first.get_by_role('button',name='Delete').click()
+        self.assertEqual(p.locator('#labels').input_value(),'Bottle, coffee mug, bottle, red wallet','deleting a rule never removes targets')
+        # A running camera uses the appended target from its next request.
+        p.evaluate('''() => {window.sentLabels=[];const f=window.fetch;window.fetch=(url,o)=>{
+            if(String(url).endsWith('api/detect'))sentLabels.push(JSON.parse(o.body).labels);return f(url,o)}}''')
+        p.locator('#labels').fill('person');p.locator('#start').click();p.wait_for_function('() => !!window.reply')
+        p.locator('[data-preset="lighter"]').click()
+        self.answer(('person',))
+        p.wait_for_function('() => sentLabels.length>=2')
+        self.assertEqual(p.evaluate('sentLabels.at(-1)'),['person','lighter'])
+        self.assertEqual(p.locator('#labels').input_value(),'person, lighter')
+        # Full target list: the rule is still saved, with a clear message.
+        p.locator('#stop').click()
+        p.locator('#labels').fill(', '.join(f'item {i}' for i in range(24)))
+        p.locator('#rule-label').fill('bottle');p.locator('#rule-save').click()
+        self.assertEqual(p.locator('#labels').input_value(),', '.join(f'item {i}' for i in range(24)))
+        self.assertIn('targets are full (24)',p.locator('#rule-error').inner_text())
+        self.assertIn('Target not configured',p.locator('#action-rules li').last.inner_text())
+        p.locator('#labels').fill('bottle');self.assertIn('Target configured',p.locator('#action-rules li').last.inner_text())
+
     def test_opt_in_filter_uses_only_fresh_semantics_and_survives_box_expiry(self):
         p=self.page
         self.assertEqual(p.locator('#actions-enabled').count(),1,'Visual Actions opt-in control exists')
         self.assertFalse(p.locator('#actions-enabled').is_checked())
         self.assertFalse(p.locator('#actions-sound').is_checked())
         p.locator('[data-preset="bottle"]').click()
-        self.assertEqual(p.locator('#labels').input_value(),'coffee mug, person','preset cannot replace targets')
-        self.assertIn('Target not configured',p.locator('#action-rules').inner_text())
+        self.assertEqual(p.locator('#labels').input_value(),'coffee mug, person, bottle','preset appends, never replaces targets')
+        self.assertIn('Target configured',p.locator('#action-rules').inner_text())
         p.locator('#labels').fill('bottle');p.locator('#start').click()
         p.wait_for_function('() => !!window.reply')
         p.locator('#actions-enabled').check()

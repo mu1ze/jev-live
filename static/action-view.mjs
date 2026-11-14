@@ -23,10 +23,12 @@ export class ActionView {
     $('clear-action-events').addEventListener('click',()=>$('action-events').replaceChildren());
     document.querySelectorAll('[data-preset]').forEach(button=>button.addEventListener('click',()=>{
       const label=button.dataset.preset, id=`preset-${label}`;
+      $('rule-error').hidden=true;
       if(!this.rules.some(r=>r.id===id)&&this.rules.length<12) {
         this.rules.push({id,label,mode:'toggle',kind:{bottle:'cool',wallet:'money',lighter:'warm'}[label],text:'',sound:false});
         this.engine.rules=this.rules;this.reset();this.renderRules();
       }
+      if(this.rules.some(r=>r.id===id))this.addTarget(label);
     }));
     $('labels').addEventListener('input',()=>this.renderRules());
     $('rule-kind').addEventListener('change',()=>this.editorKind());
@@ -51,7 +53,22 @@ export class ActionView {
     if(this.editId)this.rules=this.rules.map(r=>r.id===this.editId?rule:r);
     else {this.rules.push(rule);this.nextId++;}
     this.engine.rules=this.rules;this.reset();this.renderRules();this.clearEditor();
+    this.addTarget(rule.label);
     $('rule-label').focus();
+  }
+  // A rule's exact label joins "Choose your targets" so it is recognized without
+  // a second manual step. Existing targets are kept as-is; nothing is removed.
+  addTarget(label) {
+    const targets=$('labels').value.split(',').map(s=>s.trim()).filter(Boolean);
+    if(targets.includes(label))return true;
+    if(targets.length>=24) {
+      $('rule-error').textContent=`Rule saved, but targets are full (24). Remove a target, then add “${label}”.`;
+      $('rule-error').hidden=false;return false;
+    }
+    $('labels').value=[...targets,label].join(', ');
+    // Same path as typing: resets effects, re-renders rules and reschedules recognition.
+    $('labels').dispatchEvent(new Event('input',{bubbles:true}));
+    return true;
   }
   editRule(rule) {
     this.reset();this.editId=rule.id;
