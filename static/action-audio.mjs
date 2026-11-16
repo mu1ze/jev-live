@@ -21,6 +21,22 @@ export class ActionAudio {
       this.voice.oscillator.disconnect();this.voice.gain.disconnect();this.voice=null;
     }
   }
+  // Custom beep pattern: `repeat` beeps of `ms` each, separated by equal gaps.
+  beep(freq,ms,repeat) {
+    if(!this.enabled||!this.ready||this.context?.state!=='running'||this.voice)return false;
+    const context=this.context, oscillator=context.createOscillator(),gain=context.createGain(),now=context.currentTime,length=ms/1000;
+    const voice={oscillator,gain};this.voice=voice;
+    oscillator.type='sine';oscillator.frequency.value=freq;gain.gain.setValueAtTime(.0001,now);
+    for(let i=0;i<repeat;i++) {
+      const start=now+i*length*2;
+      gain.gain.setValueAtTime(.0001,start);gain.gain.exponentialRampToValueAtTime(.05,start+Math.min(.015,length/4));
+      gain.gain.setValueAtTime(.05,start+length*.8);gain.gain.exponentialRampToValueAtTime(.0001,start+length);
+    }
+    oscillator.connect(gain);gain.connect(context.destination);
+    oscillator.onended=()=>{oscillator.disconnect();gain.disconnect();if(this.voice===voice)this.voice=null;};
+    oscillator.start(now);oscillator.stop(now+length*(repeat*2-1)+.02);
+    return true;
+  }
   play() {
     if(!this.enabled||!this.ready||this.context?.state!=='running'||this.voice)return;
     const context=this.context, oscillator=context.createOscillator(),gain=context.createGain(),now=context.currentTime;

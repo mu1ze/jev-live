@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {VisualActions,validRule} from '../static/visual-actions.mjs';
+import {VisualActions,validRule,safeLink,normalizeLink,actionHref} from '../static/visual-actions.mjs';
 const rule={id:'bottle',label:'bottle',kind:'cool',text:'',sound:false};
 const positive=[{label:'bottle',confidence:.9}];
 const engine=(mode)=>new VisualActions([{...rule,...(mode?{mode}:{})}]);
@@ -69,4 +69,23 @@ test('filter priority and cards coexist across independent mixed-mode rule state
   for(const t of [2000,3000,4000])e.accept([],t,t);
   assert.equal(e.tick(5000).active.length,2);
   const off=confirm(e,5000);assert.equal(off.active.length,1);assert.equal(off.filter,'warm');assert.equal(off.exited.length,2);
+});
+test('device shortcut rules validate their message, Shortcut name or link',()=>{
+  for(const kind of ['notify','speak','shortcut'])assert.equal(validRule({...rule,kind,text:'Leaving Home'}),true);
+  for(const kind of ['notify','speak','shortcut'])assert.equal(validRule({...rule,kind,text:' '}),false,'message/name required');
+  assert.equal(validRule({...rule,kind:'shortcut',text:'a\nb'}),false,'Shortcut names are one line');
+  for(const url of ['https://example.com/','http://homeassistant.local:8123/','tel:+15551234','shortcuts://run-shortcut?name=Lights','spotify:playlist:1'])
+    assert.equal(validRule({...rule,kind:'link',url}),true,url);
+  for(const url of [undefined,'','javascript:alert(1)','JAVASCRIPT:alert(1)','data:text/html,x','blob:https://a/1','file:///etc/passwd','https://user:pw@example.com/','example.com',' https://a.com/','https://a.com/ x'])
+    assert.equal(validRule({...rule,kind:'link',url}),false,String(url));
+  assert.equal(validRule({...rule,url:'https://a.com/'}),false,'only link rules carry a URL');
+  assert.equal(normalizeLink(' HTTPS://Example.com '),'https://example.com/');
+  assert.equal(safeLink(normalizeLink('JavaScript:alert(1)')),false);
+});
+test('Shortcut links pass the recognized label as input; device kinds never set a filter',()=>{
+  assert.equal(actionHref({kind:'shortcut',label:'car keys',text:'Leaving Home & Lock'}),'shortcuts://run-shortcut?name=Leaving%20Home%20%26%20Lock&input=text&text=car%20keys');
+  assert.equal(actionHref({kind:'link',url:'tel:+1'}),'tel:+1');
+  const e=new VisualActions([{...rule,id:'a',kind:'notify',text:'hi'},{...rule,id:'b',kind:'shortcut',text:'X'},{...rule,id:'c',kind:'warm'}]);
+  const r=confirm(e);
+  assert.equal(r.entered.length,3);assert.equal(r.filter,'warm','first *filter* wins, device actions are skipped');
 });

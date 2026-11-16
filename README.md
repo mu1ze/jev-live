@@ -22,6 +22,7 @@ Open `http://127.0.0.1:8788/` **on the computer running the server**, or use you
 Optional server configuration:
 
 - `JEV_API_KEY`: server-side key; UI key becomes optional and can override it. The configuration endpoint returns only a boolean, never the key.
+- `WEBHOOK_ALLOW_PRIVATE=1`: optional. Lets custom-action webhooks reach private/LAN/tailnet addresses (for example a local Home Assistant). Loopback and link-local stay blocked.
 - `APP_ACCESS_TOKEN`: strongly recommended for **any reverse-proxy deployment**, especially when a server key is configured. Restricts HTML, assets and API endpoints.
 - `PORT`: default `8788`; command-line `--port` overrides it.
 - `APP_PREFIX` / `--prefix`: internal route prefix **only if your proxy preserves the mount path**.
@@ -125,7 +126,7 @@ Workflow, then in the Visual Actions panel add a preset or create a rule. Its
 **exact, case-sensitive label** is appended to Choose your targets automatically
 if it is missing. Turn on **Enable actions** and Start camera. Bottle adds an
 underwater/cool display filter, wallet a celebratory green money glow, and lighter
-a warm glow. Adding or editing a rule only *appends* its label: existing targets
+a warm glow; keys and cell phone use device shortcuts (below). Adding or editing a rule only *appends* its label: existing targets
 are never replaced or removed, and no camera starts. Deleting a rule leaves its
 target in place. If 24 targets are already set, the rule is still saved and a
 message asks you to free a target. As with typing, the appended target resets
@@ -133,6 +134,141 @@ active effects and is used from the next recognition request. A rule whose label
 is not a current target is explicitly marked. Reapplying a preset does not
 duplicate or overwrite an edited rule. Edit/Delete and a custom plain-text card
 are supported.
+
+### Device shortcuts
+
+Besides display filters and cards, a rule's **Action** can be a device shortcut.
+All of them run in this browser on this device. Nothing is sent anywhere beyond
+the existing recognition requests unless you add a webhook step to a custom
+action (below).
+
+| Action | What happens on activation | Needs |
+| --- | --- | --- |
+| System notification | One OS notification, titled with the label, showing your message | Notification permission (asked when you save the rule) |
+| Speak aloud | Your words are spoken once (`speechSynthesis`) | **Allow short sounds on this device** |
+| Run an Apple Shortcut | A card with a **Run “Name”** button opens `shortcuts://run-shortcut?name=…&input=text&text=<label>` | iPhone, iPad or Mac with that Shortcut |
+| Open an app or link | A card with an **Open …** button: `https://` opens a new tab; app links (`tel:`, `sms:`, `spotify:`, `shortcuts:`, …) open the app | — |
+
+- Browsers only launch apps or open tabs from a tap, so Shortcut and link actions
+  show a one-tap card while the rule is active instead of firing silently. Tapping
+  it is logged.
+- Notifications and speech fire once per activation, never on repeated positives.
+  If permission is missing or the browser lacks the feature (for example, page
+  notifications on Android Chrome), the event log says so instead of failing
+  silently.
+- Links are parsed and normalized. `javascript:`, `data:`, `blob:`, `file:`,
+  credentials in the URL and other unsafe schemes are refused. Shortcut names are
+  a single line.
+- Presets: **Keys** runs a Shortcut named “Leaving Home”, and **Cell phone**
+  speaks a short focus nudge. Device actions never change the preview filter; the
+  first active *filter* rule still wins.
+
+### Custom actions
+
+**Custom actions** (right column) let you chain up to **10 steps** into your own
+named action. Pick it in a rule under **Your actions**. Any label Jev can
+recognize can trigger it, and there are at most 12 custom actions. Each step kind
+is defined once in `static/custom-actions.mjs` (`CATALOG`), which drives the
+editor, validation and saved-state checks.
+
+| Group | Step | Runs | What it does / needs |
+| --- | --- | --- | --- |
+| Look | Underwater, warm, money filter | while active | Preset preview filters |
+| Look | Custom filter | while active | Your CSS filter from `blur brightness contrast grayscale hue-rotate invert opacity saturate sepia` (no `url()`) |
+| Look | Text card | while active | Plain-text overlay |
+| Look | Keep screen awake | while active | Screen Wake Lock |
+| Alerts | System notification | on/off | See *Notifications* below |
+| Alerts | Speak aloud | on/off | `speechSynthesis`; needs **Allow short sounds** |
+| Alerts | Chime, Custom beep | on/off | WebAudio; the beep sets pitch, length and count; needs **Allow short sounds** |
+| Alerts | Vibrate | on/off | Your on/off pattern; Android (iPhone and desktops have no vibration API) |
+| Camera | Save a photo | on/off | Downloads the current frame as JPEG |
+| Camera | Record a clip | on/off | Records 1–60 s of the camera and downloads MP4/WebM |
+| Apps & sharing | Copy text | on/off | Clipboard; tab must be focused (Safari also needs a tap) |
+| Apps & sharing | Share sheet | tap | Messages, WhatsApp, Mail, AirDrop…; falls back to copy |
+| Apps & sharing | Apple Shortcut | tap | `shortcuts://run-shortcut`, label passed as input |
+| Apps & sharing | App or link | tap | `https:`, `tel:`, `sms:`, `mailto:`, `spotify:`, `intent:` (Android, e.g. Tasker)… |
+| Internet | Webhook | on/off | Any HTTP endpoint, with your own headers; see below |
+| Hardware | Bluetooth device write | on/off | Writes bytes to a BLE characteristic (lights, plugs, ESP32…); Chrome/Edge |
+| Hardware | Serial port write | on/off | Sends a line to USB serial (Arduino…); desktop Chrome/Edge |
+| Hardware | MIDI message | on/off | Sends bytes to every MIDI output (DAWs, OBS, lighting); no SysEx |
+| Flow | Wait | on/off | Pauses 0.1–60 s before the next step |
+
+- Text fields that say so accept `{{label}}`, `{{event}}`, `{{time}}` and `{{rule}}`.
+- Event steps fire once, in order, **when the rule turns on** (default) or **when
+  it turns off**. "Turns off" means confirmed absence in While present mode, or
+  the return flip in Toggle mode. Wait steps hold the sequence. A reset, Stop or
+  settings change cancels the remaining steps and never fires turn-off steps.
+  Photos, clips and webhooks run in the background, so later steps don't wait for
+  them.
+- Each step reports success or the exact reason it couldn't run (unsupported
+  browser, missing permission, device not paired…) in the event log. It never
+  fails silently.
+- An action that a rule uses cannot be deleted. Editing an action resets active
+  effects, as editing a rule does. Built-in rules are one-step actions, and the
+  legacy chime checkbox becomes a chime step.
+
+**Arbitrary code is not a step type, on purpose.** A saved script would run with
+your session and camera, and anything that could plant one (an imported action, a
+copied link) could take over the page. To trigger *anything*, use the escape
+hatches instead:
+- **Webhooks:** Home Assistant, IFTTT, Zapier, n8n and Node-RED reach almost any
+  smart device or service.
+- **Apple Shortcuts**, and **`intent:` links** to Android automation apps.
+- **Bluetooth, serial and MIDI:** for hardware you control.
+
+**Device permissions & connections** (under the sound toggle). Browsers only show
+permission prompts and device pickers from a tap, so this panel holds:
+- **Allow notifications**, with the current state and a **Send test** button.
+- **Pair Bluetooth device.** Pair *after* adding a Bluetooth step: the picker can
+  only allow the services your steps use.
+- **Connect USB serial**, with the baud rate.
+- **Enable MIDI.**
+- A line showing which other capabilities this browser has.
+
+Connections last until the tab closes.
+
+**Notifications.**
+- Permission is requested when you tap **Allow notifications**, choose a
+  notification step, or save a rule or action that has one.
+- Notifications go through a tiny service worker (`static/sw.js`: no fetch
+  handler, no caching). Android Chrome requires one; desktop falls back to the page
+  `Notification` API.
+- iPhone and iPad allow web notifications only in a home-screen app: Share → Add to
+  Home Screen, then open it from the icon. The app ships a manifest for that. The
+  manifest's start URL carries the access link because home-screen apps have their
+  own cookies, and it is only served to an already-authorized session.
+- A denied permission can only be undone in the browser's site settings. The panel
+  says so.
+
+**Webhooks** let a detection drive Home Assistant, IFTTT, Zapier, n8n, ntfy and
+similar tools without a tap. Browsers cannot call arbitrary URLs from this page
+(CSP `connect-src 'self'`), so the page asks this app's server (`POST
+/api/webhook`, same access token and Origin checks as detection) to send one
+request.
+
+- You set the URL, method (POST, PUT or GET), optional headers (up to 8
+  `Name: value` lines, e.g. `Authorization: Bearer …` for the Home Assistant REST
+  API) and a body template up to 1,000 characters. Host, Content-Length, Cookie,
+  hop-by-hop and forwarding headers cannot be set, and CR/LF in values is refused. `{{label}}`, `{{event}}` (`on`/`off`), `{{time}}` (ISO) and
+  `{{rule}}` are filled in. In a JSON-looking body the values are JSON-escaped.
+  JSON bodies are sent as `application/json` and others as `text/plain`.
+- Only the status code comes back to the event log. Redirects are never followed,
+  and the request times out after 8 s. A step does not fire again while its
+  previous call is still running. The server sends at most 20 webhooks a minute.
+- http/https only, with no `user:password@`. The host is resolved once and the
+  connection is pinned to the checked address (rebinding-safe). Loopback,
+  link-local/cloud metadata, multicast and reserved addresses are **always**
+  refused. Private, LAN, CGNAT and tailnet addresses are refused unless the server
+  is started with `WEBHOOK_ALLOW_PRIVATE=1`. The request comes from wherever the
+  server runs, so a LAN Home Assistant needs the server on that LAN, or a public
+  or Nabu Casa webhook URL.
+
+**Saving.** Rules and custom actions are saved in this browser
+(`localStorage`, key `jev-live.visual-actions.v1`), including webhook URLs.
+Untick **Remember rules and custom actions on this device** to erase them and stop
+saving. On load, entries are re-validated: invalid ones, and rules whose action
+is missing, are dropped. Restored rule labels are appended to targets. The API
+key, frames, results and the event log are never stored.
 
 - At most **12 rules**, labels up to 80 characters and card messages up to 240.
   The earliest active filter in rule-list order wins; all active text cards can
@@ -181,13 +317,18 @@ are supported.
   applies; no audible-device test is claimed.
 - The visible local event log keeps the latest **40 timestamped activation/clear
   events**, with a Clear log button. Rule changes/Stop do not delete history.
-  Rules, permissions and history are **in-memory for this tab only**, not persisted.
-  No frames, credentials, raw provider replies, telemetry, webhooks or integrations
-  are saved/uploaded by actions. Reload returns everything to off/empty.
+  Rules and custom actions are saved on this device unless you turn that off
+  (see Saving above). Permissions, effects and history are in-memory for this tab.
+  No frames, API keys, raw provider replies or telemetry are saved or uploaded by
+  actions. Only webhook steps you configure send anything, and they send only
+  their own templated body. Reload turns every effect off.
 
 Architecture: `static/visual-actions.mjs` is a pure deterministic-clock state
 machine; `action-view.mjs` owns the opt-in editor, display and bounded history;
-`action-audio.mjs` is a gesture-gated bounded WebAudio adapter. `app.js` feeds the
+`action-audio.mjs` is a gesture-gated bounded WebAudio adapter; `custom-actions.mjs`
+validates steps, actions and saved state; `device-actions.mjs` runs device steps
+(notifications, capture, clipboard, share, wake lock, Bluetooth, serial, MIDI);
+`webhook.py` is the server-side relay. `app.js` feeds the
 engine only successful same-source semantic responses with capture timestamps
 and action-generation tokens. The gateway change only allowlists those three
 same-origin modules; auth, CSP, worker confinement and the default serial 4 Hz

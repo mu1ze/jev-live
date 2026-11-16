@@ -224,7 +224,16 @@ def accepts_gzip(header):
     return False
 
 
-def create_server(port=8788, api_key='', access_token='', prefix='', transport=None, public_prefix=None, upstream_factory=None):
+def load_webhook_module():
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location('jev_webhook', Path(__file__).resolve().parent / 'webhook.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def create_server(port=8788, api_key='', access_token='', prefix='', transport=None, public_prefix=None, upstream_factory=None, webhook_relay=None, webhook_allow_private=False):
     import hashlib
     import hmac
     import secrets
@@ -240,6 +249,9 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
     static_cache = StaticCache(Path(__file__).parent / 'static')
     # Test callers may inject a plain-HTTP connection factory; never via HTTP/env/CLI.
     upstream = UpstreamPool(upstream_factory or default_upstream_connection)
+    webhook = load_webhook_module()
+    # Tests may inject a relay with their own resolver/address policy; never via HTTP.
+    webhooks = webhook_relay or webhook.WebhookRelay(allow_private=webhook_allow_private)
 
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
@@ -294,6 +306,22 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                 return
             if not self.guard():
                 return
+            if parsed.path == prefix + '/manifest.webmanifest':
+                # Home-screen apps (iOS needs one for notifications) have their own cookie
+                # jar, so the start URL carries the access link. Only an authorized
+                # session can read this, and it already holds the token.
+                start = public_prefix + '/' + ('?access=' + access_token if access_token else '')
+                manifest = {'name': 'Jev Live', 'short_name': 'Jev Live', 'start_url': start, 'scope': public_prefix + '/',
+                            'display': 'standalone', 'background_color': '#0c120d', 'theme_color': '#0c120d',
+                            'icons': [{'src': 'icon.svg', 'sizes': 'any', 'type': 'image/svg+xml', 'purpose': 'any'}]}
+                body = json.dumps(manifest).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/manifest+json')
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if parsed.path == prefix + '/api/config':
                 self.send_json(200, {'serverKeyConfigured': bool(api_key)})
                 return
@@ -303,8 +331,8 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                 self.send_header('Content-Length', '0')
                 self.end_headers()
                 return
-            static_routes = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript'), '/core.mjs': ('core.mjs', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
-            for name in ('tracking-worker.js', 'tracker-classic.js', 'tracking-client.mjs', 'visual-actions.mjs', 'action-view.mjs', 'action-audio.mjs'):
+            static_routes = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript'), '/core.mjs': ('core.mjs', 'text/javascript'), '/style.css': ('style.css', 'text/css'), '/icon.svg': ('icon.svg', 'image/svg+xml')}
+            for name in ('tracking-worker.js', 'tracker-classic.js', 'tracking-client.mjs', 'visual-actions.mjs', 'action-view.mjs', 'action-audio.mjs', 'custom-actions.mjs', 'device-actions.mjs', 'sw.js'):
                 static_routes['/' + name] = (name, 'text/javascript')
             for name in ('opencv.js', 'LICENSE.opencv', 'COPYRIGHT.opencv', 'asset-manifest.json'):
                 static_routes['/trackingvendor/' + name] = ('trackingvendor/' + name, 'text/javascript' if name.endswith('.js') else 'text/plain')
@@ -358,7 +386,8 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
         def do_POST(self):
             if not self.guard():
                 return
-            if urlsplit(self.path).path != prefix + '/api/detect':
+            path = urlsplit(self.path).path
+            if path not in (prefix + '/api/detect', prefix + '/api/webhook'):
                 self.send_json(404, {'error': 'Not found.'})
                 return
             host = self.headers.get('Host', '')
@@ -368,6 +397,9 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                 expected = 'https://' + self.headers.get('X-Forwarded-Host', host)
             if not expected or self.headers.get('Origin') != expected or self.headers.get('Sec-Fetch-Site') == 'cross-site':
                 self.send_json(403, {'error': 'Same-origin requests only.'})
+                return
+            if path == prefix + '/api/webhook':
+                self.relay_webhook()
                 return
             from urllib.request import Request
             from urllib.error import HTTPError, URLError
@@ -454,6 +486,27 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                     continue
             self.send_json(200, {'detections': detections})
 
+        def relay_webhook(self):
+            try:
+                size = int(self.headers.get('Content-Length', '0'))
+                if not 1 <= size <= 16384 or self.headers.get('Transfer-Encoding') or self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+                    raise ValueError()
+                body = json.loads(self.rfile.read(size))
+                if not isinstance(body, dict) or not {'url', 'method', 'body'} <= set(body) <= {'url', 'method', 'body', 'headers'}:
+                    raise ValueError()
+            except (ValueError, TypeError):
+                self.send_json(400, {'error': 'Invalid webhook request.'})
+                return
+            try:
+                status = webhooks.send(body['url'], body['method'], body['body'], body.get('headers'))
+            except webhooks.Error as error:
+                self.send_json(error.status, {'error': error.message})
+                return
+            if 200 <= status < 300:
+                self.send_json(200, {'status': status})
+            else:
+                self.send_json(502, {'error': f'Webhook answered HTTP {status}.', 'status': status})
+
     class Server(ThreadingHTTPServer):
         def server_close(self):
             super().server_close()
@@ -474,7 +527,7 @@ if __name__ == '__main__':
     parser.add_argument('--prefix', default=os.environ.get('APP_PREFIX', ''), help='Only for prefix-preserving proxies; leave empty when proxy strips /jev-live.')
     parser.add_argument('--public-prefix', default=os.environ.get('PUBLIC_PREFIX'), help='External mount for redirects and cookies when the reverse proxy strips its path prefix.')
     args = parser.parse_args()
-    app = create_server(port=args.port, api_key=os.environ.get('JEV_API_KEY', ''), access_token=os.environ.get('APP_ACCESS_TOKEN', ''), prefix=args.prefix, public_prefix=args.public_prefix)
+    app = create_server(port=args.port, api_key=os.environ.get('JEV_API_KEY', ''), access_token=os.environ.get('APP_ACCESS_TOKEN', ''), prefix=args.prefix, public_prefix=args.public_prefix, webhook_allow_private=os.environ.get('WEBHOOK_ALLOW_PRIVATE') == '1')
     print(f'Jev Live listening on http://127.0.0.1:{app.server_address[1]} (credentials and request logs disabled)', flush=True)
     try:
         app.serve_forever()

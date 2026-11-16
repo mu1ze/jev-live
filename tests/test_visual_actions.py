@@ -19,6 +19,8 @@ class VisualActionBrowserTests(unittest.TestCase):
         self.errors=[];self.page.on('pageerror',lambda e:self.errors.append(str(e)))
         self.page.route('**/tracking-worker.js',lambda route:route.abort())
         self.page.add_init_script("""
+            // Reload is a clean slate here unless a test opts in to saved rules.
+            if(!sessionStorage.getItem('keepSavedActions'))localStorage.clear();
             window.fixtureHidden=false;Object.defineProperty(document,'hidden',{get:()=>window.fixtureHidden});
             const original=window.fetch;window.fixtureFetch=original;
             window.fetch=(url,options)=>String(url).endsWith('api/detect')?new Promise(resolve=>{
@@ -571,4 +573,239 @@ class VisualActionBrowserTests(unittest.TestCase):
         self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool')
         p.wait_for_timeout(2700)
         self.assertEqual(p.locator('#video').get_attribute('data-action-filter'),'cool','errors/no replies do not turn a latched toggle off')
-        self.assertEqual(p.evaluate('localStorage.length+sessionStorage.length'),0)
+        # Only the rules/custom-actions entry is stored: never the key, frames or results.
+        self.assertEqual(p.evaluate('Object.keys(localStorage)'),['jev-live.visual-actions.v1'])
+        self.assertEqual(p.evaluate('sessionStorage.length'),0)
+        saved=p.evaluate("localStorage.getItem('jev-live.visual-actions.v1')")
+        self.assertNotIn('local-fixture-key',saved);self.assertNotIn('base64',saved);self.assertNotIn('confidence',saved)
+        p.locator('#actions-remember').uncheck()
+        self.assertEqual(p.evaluate("localStorage.getItem('jev-live.visual-actions.v1')"),'{"version":1,"remember":false}','turning saving off erases saved rules')
+
+    def test_device_shortcuts_notify_speak_and_tap_to_run(self):
+        p=self.page
+        p.context.grant_permissions(['notifications'])
+        p.add_init_script("""
+            window.notified=[];window.spoken=[];
+            window.Notification=class {static permission='granted';static requestPermission(){return Promise.resolve('granted');}
+              constructor(title,options){window.notified.push([title,options.body,options.tag]);}};
+            // Android/installed apps route through the service worker; capture either path.
+            ServiceWorkerRegistration.prototype.showNotification=function(title,options){window.notified.push([title,options.body,options.tag]);return Promise.resolve();};
+            speechSynthesis.speak=u=>window.spoken.push(u.text);
+        """)
+        p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#workflow-mode').select_option('actions')
+        p.locator('#labels').fill('person')
+        # Editor shows only the field each kind needs; unsafe links are refused.
+        p.locator('#rule-kind').select_option('link')
+        self.assertTrue(p.locator('#rule-url').is_visible());self.assertFalse(p.locator('#rule-text').is_visible())
+        p.locator('#rule-label').fill('remote');p.locator('#rule-url').fill('javascript:alert(1)');p.locator('#rule-save').click()
+        self.assertIn('script, data and file links are not allowed',p.locator('#rule-error').inner_text())
+        self.assertEqual(p.locator('#action-rules li').count(),0)
+        p.locator('#rule-url').fill(' https://example.com/play ');p.locator('#rule-save').click()
+        p.locator('#rule-label').fill('mug');p.locator('#rule-kind').select_option('notify')
+        self.assertIn('Notification message',p.locator('#rule-text-field').inner_text())
+        p.locator('#rule-text').fill('Coffee time');p.locator('#rule-save').click()
+        p.locator('#rule-label').fill('mug');p.locator('#rule-kind').select_option('speak');p.locator('#rule-text').fill('Hello mug');p.locator('#rule-save').click()
+        p.locator('[data-preset="keys"]').click()
+        self.assertEqual(p.locator('#labels').input_value(),'person, remote, mug, keys')
+        self.assertIn('keys → Apple Shortcut “Leaving Home”',p.locator('#action-rules').inner_text())
+        self.assertIn('remote → App or link example.com',p.locator('#action-rules').inner_text())
+        p.locator('#actions-enabled').check();p.locator('#start').click()
+        self.answer(('remote','mug','keys'));self.answer(('remote','mug','keys'))
+        p.wait_for_function("() => document.querySelectorAll('#action-cards a').length===2")
+        p.wait_for_function('() => window.notified.length===1')
+        self.assertEqual(p.evaluate('window.notified'),[['Jev Live · mug','Coffee time','rule-2']],'one notification per activation')
+        self.assertEqual(p.evaluate('window.spoken'),[],'speech needs the device sound permission')
+        self.assertIn('not spoken · allow short sounds',p.locator('#action-events').inner_text())
+        links=p.locator('#action-cards a')
+        self.assertEqual(links.nth(0).get_attribute('href'),'https://example.com/play')
+        self.assertEqual(links.nth(0).get_attribute('rel'),'noopener noreferrer')
+        self.assertEqual(links.nth(1).get_attribute('href'),'shortcuts://run-shortcut?name=Leaving%20Home&input=text&text=keys')
+        self.assertIsNone(links.nth(1).get_attribute('target'),'app links open the app, not a tab')
+        self.assertEqual(links.nth(1).inner_text(),'Run “Leaving Home”')
+        self.assertIsNone(p.locator('#video').get_attribute('data-action-filter'),'device actions never filter the preview')
+        p.evaluate("document.addEventListener('click',e=>{if(e.target.closest('.run-action'))e.preventDefault()},true)") # fixture: log the tap, launch nothing
+        links.nth(1).click()
+        self.assertIn('keys → Apple Shortcut “Leaving Home” run by tap',p.locator('#action-events').inner_text())
+        for _ in range(3):self.answer(('remote','mug','keys'))
+        self.assertEqual(len(p.evaluate('window.notified')),1,'sustained presence never repeats a notification')
+        # With sound allowed, a fresh activation speaks once.
+        p.locator('#actions-sound').check()
+        p.wait_for_function("() => document.querySelector('#actions-sound-hint').textContent.includes('ready')")
+        p.locator('#reset-actions').click()
+        self.assertEqual(p.locator('#action-cards a').count(),0,'reset clears tap cards')
+        self.answer(('mug',))
+        self.answer(('mug',));self.answer(('mug',))
+        p.wait_for_function('() => window.spoken.length===1')
+        self.assertEqual(p.evaluate('window.spoken'),['Hello mug'])
+        p.wait_for_function('() => window.notified.length===2')
+
+    def test_custom_action_builder_runs_steps_webhooks_and_is_saved(self):
+        p=self.page;hooks=[]
+        def on_hook(route):
+            hooks.append(__import__('json').loads(route.request.post_data))
+            route.fulfill(status=200,content_type='application/json',body='{"status": 204}')
+        p.route('**/api/webhook',on_hook)
+        p.locator('#labels').fill('person')
+        p.locator('#action-name').fill('Desk lamp')
+        rows=p.locator('#action-steps li')
+        rows.nth(0).get_by_label('Step 1').select_option('warm')
+        self.assertFalse(rows.nth(0).get_by_label('Runs').is_visible(),'filters last while active; no on/off choice')
+        p.locator('#add-step').click();rows.nth(1).get_by_label('Step 2').select_option('card');rows.nth(1).get_by_label('Card message').fill('Lamp on')
+        p.locator('#add-step').click();rows.nth(2).get_by_label('Step 3').select_option('webhook')
+        rows.nth(2).get_by_label('Webhook URL',exact=False).fill('https://user:pw@hooks.example.com/lamp')
+        p.locator('#action-save').click()
+        self.assertIn('Step 3 (Webhook): check “Webhook URL',p.locator('#action-error').inner_text())
+        rows.nth(2).get_by_label('Webhook URL',exact=False).fill('https://hooks.example.com/lamp')
+        p.locator('#add-step').click();rows.nth(3).get_by_label('Step 4').select_option('webhook')
+        rows.nth(3).get_by_label('Runs').select_option('off');rows.nth(3).get_by_label('Webhook URL',exact=False).fill('https://hooks.example.com/lamp')
+        p.locator('#action-save').click()
+        self.assertEqual(p.locator('#custom-actions li').count(),1)
+        self.assertIn('Warm glow filter → Text card → Webhook → Webhook (on turn-off)',p.locator('#custom-actions').inner_text())
+        self.assertEqual(p.locator('#action-steps li').count(),1,'editor resets after saving')
+        p.locator('#rule-label').fill('lamp');p.locator('#rule-mode').select_option('present');p.locator('#rule-kind').select_option('custom:action-1')
+        self.assertIn('Runs your action “Desk lamp”',p.locator('#rule-kind-help').inner_text())
+        p.locator('#rule-save').click()
+        self.assertIn('lamp → Custom “Desk lamp” · While present',p.locator('#action-rules').inner_text())
+        self.assertEqual(p.locator('#labels').input_value(),'person, lamp')
+        p.locator('#custom-actions li').get_by_role('button',name='Delete').click()
+        self.assertIn('Used by 1 rule',p.locator('#action-error').inner_text())
+        self.assertEqual(p.locator('#custom-actions li').count(),1)
+        p.locator('#actions-enabled').check();p.locator('#start').click()
+        self.answer(('lamp',));self.answer(('lamp',))
+        p.wait_for_function("() => document.querySelector('#video').dataset.actionFilter==='warm'")
+        self.assertEqual(p.locator('#action-cards').inner_text(),'Lamp on')
+        p.wait_for_function("() => document.querySelector('#action-events').textContent.includes('sent (on) · HTTP 204')")
+        self.assertEqual(len(hooks),1,'the turn-off webhook waits for turn-off')
+        self.assertEqual((hooks[0]['url'],hooks[0]['method']),('https://hooks.example.com/lamp','POST'))
+        body=__import__('json').loads(hooks[0]['body'])
+        self.assertEqual((body['label'],body['event']),('lamp','on'));self.assertRegex(body['time'],r'^\d{4}-\d\d-\d\dT')
+        for _ in range(3):self.answer(('lamp',))
+        self.assertEqual(len(hooks),1,'sustained presence never repeats a webhook')
+        for _ in range(8):
+            self.answer(());p.wait_for_timeout(700)
+            if len(hooks)==2:break
+        p.wait_for_function("() => !document.querySelector('#video').hasAttribute('data-action-filter')")
+        self.assertEqual(__import__('json').loads(hooks[1]['body'])['event'],'off')
+        # Saved on this device: a reload restores the action, the rule and its target.
+        p.evaluate("sessionStorage.setItem('keepSavedActions','1')")
+        p.locator('#stop').click()
+        if p.evaluate('!!window.reply'):p.evaluate('window.reply([])')
+        p.reload();p.locator('#workflow-mode').select_option('actions')
+        self.assertEqual(p.locator('#custom-actions li').count(),1)
+        self.assertIn('lamp → Custom “Desk lamp” · While present',p.locator('#action-rules').inner_text())
+        self.assertEqual(p.locator('#labels').input_value(),'coffee mug, person, lamp')
+        self.assertIn('Restored 1 rule and 1 custom action',p.locator('#action-events').inner_text())
+        p.locator('#custom-actions li').get_by_role('button',name='Edit').click()
+        self.assertEqual(p.locator('#action-name').input_value(),'Desk lamp')
+        self.assertEqual(p.locator('#action-steps li').count(),4)
+        self.assertEqual(p.locator('#action-steps li').nth(3).get_by_label('Runs').input_value(),'off')
+        self.assertEqual(p.locator('#rule-kind option[value="custom:action-1"]').count(),1)
+
+    DEVICE_FIXTURE = """
+        window.calls=[];const t0=performance.now();const rec=(name,...args)=>window.calls.push([name,Math.round(performance.now()-t0),...args]);
+        navigator.vibrate=pattern=>{rec('vibrate',pattern);return true;};
+        Object.defineProperty(navigator,'clipboard',{value:{writeText:text=>{rec('copy',text);return Promise.resolve();}}});
+        navigator.share=data=>{rec('share',data.text);return Promise.resolve();};
+        Object.defineProperty(navigator,'wakeLock',{value:{request:type=>{rec('wake',type);const lock=new EventTarget();lock.release=()=>{rec('release');return Promise.resolve();};return Promise.resolve(lock);}}});
+        const characteristic={properties:{writeWithoutResponse:true},writeValueWithoutResponse:data=>{rec('bluetooth',[...data]);return Promise.resolve();}};
+        const gatt={connected:false,connect(){this.connected=true;return Promise.resolve({getPrimaryService:s=>{rec('service',s);return Promise.resolve({getCharacteristic:c=>{rec('characteristic',c);return Promise.resolve(characteristic);}});}});}};
+        Object.defineProperty(navigator,'bluetooth',{value:{requestDevice:options=>{rec('pair',options.optionalServices);return Promise.resolve({name:'Desk light',gatt});}}});
+        Object.defineProperty(navigator,'serial',{value:{requestPort:()=>Promise.resolve({open:o=>{rec('open',o.baudRate);return Promise.resolve();},getInfo:()=>({}),
+          writable:{getWriter:()=>({write:bytes=>{rec('serial',new TextDecoder().decode(bytes));return Promise.resolve();},releaseLock(){}})},close:()=>Promise.resolve()})}});
+        navigator.requestMIDIAccess=()=>Promise.resolve({outputs:new Map([['a',{name:'Synth',send:bytes=>rec('midi',bytes)}]])});
+    """
+
+    def build_action(self,name,steps):
+        p=self.page;p.locator('#action-name').fill(name)
+        for i,(kind,fields) in enumerate(steps):
+            if i:p.locator('#add-step').click()
+            row=p.locator('#action-steps li').nth(i)
+            row.get_by_label(f'Step {i+1}',exact=True).select_option(kind)
+            for label,value in fields:
+                control=row.get_by_label(label,exact=True)
+                if control.evaluate('n=>n.tagName')=='SELECT':control.select_option(value)
+                else:control.fill(value)
+        p.locator('#action-save').click()
+        self.assertEqual(p.locator('#action-error').is_visible(),False,p.locator('#action-error').inner_text())
+
+    def test_every_device_step_runs_in_order_with_waits(self):
+        p=self.page;downloads=[]
+        p.on('download',lambda d:downloads.append(d.suggested_filename))
+        p.add_init_script(self.DEVICE_FIXTURE)
+        p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#workflow-mode').select_option('actions');p.locator('#labels').fill('cat')
+        self.assertIn('Vibrate ✓',p.locator('#device-support').inner_text())
+        self.build_action('Everything',[
+            ('filter',[('CSS filter','grayscale(1) hue-rotate(90deg)')]),
+            ('wakelock',[]),
+            ('vibrate',[('Pattern · ms on, off, on…','100, 50, 100')]),
+            ('copy',[('Text to copy','{{label}} turned {{event}}')]),
+            ('snapshot',[]),
+            ('record',[('Seconds','1')]),
+            ('wait',[('Seconds','0.6')]),
+            ('serial',[('Text to send','ON {{label}}'),('Line ending','\r\n')]),
+            ('midi',[('MIDI bytes (hex)','90 3c 7f')]),
+            ('bluetooth',[('Service UUID','0xffe0'),('Characteristic UUID','0000ffe1-0000-1000-8000-00805f9b34fb'),('Bytes (hex)','a0 01 ff')]),
+        ])
+        self.build_action('Tell someone',[('share',[('Text to share','Saw {{label}}')])])
+        self.assertIn('Custom filter → Keep screen awake → Vibrate → Copy text → Save a photo → Record a clip → Wait → Serial port write → MIDI message → Bluetooth device write',p.locator('#custom-actions').inner_text())
+        p.locator('#pair-bluetooth').click();p.wait_for_function("() => document.querySelector('#bluetooth-state').textContent.startsWith('Paired · Desk light')")
+        self.assertEqual(p.evaluate("calls.find(c=>c[0]==='pair')[2]"),[0xffe0],'pairing allows the services your steps use')
+        p.locator('#serial-baud').fill('115200');p.locator('#pair-serial').click();p.wait_for_function("() => document.querySelector('#serial-state').textContent.startsWith('Connected')")
+        p.locator('#enable-midi').click();p.wait_for_function("() => document.querySelector('#midi-state').textContent==='Enabled · Synth'")
+        for label,action in (('cat','custom:action-1'),('cat','custom:action-2')):
+            p.locator('#rule-label').fill(label);p.locator('#rule-kind').select_option(action);p.locator('#rule-save').click()
+        p.locator('#actions-enabled').check();p.locator('#start').click()
+        p.wait_for_function('() => document.querySelector("#video").readyState>=2')
+        self.answer(('cat',));self.answer(('cat',))
+        p.wait_for_function("() => calls.some(c=>c[0]==='bluetooth')")
+        calls={c[0]:c for c in p.evaluate('calls')}
+        self.assertEqual(p.locator('#video').evaluate('n=>[n.dataset.actionFilter,n.style.filter]'),['custom','grayscale(1) hue-rotate(90deg)'])
+        self.assertEqual(calls['wake'][2],'screen')
+        self.assertEqual(calls['vibrate'][2],[100,50,100])
+        self.assertEqual(calls['copy'][2],'cat turned on')
+        self.assertEqual(calls['open'][2],115200)
+        self.assertEqual(calls['serial'][2],'ON cat\r\n')
+        self.assertEqual(calls['midi'][2],[0x90,0x3c,0x7f])
+        self.assertEqual((calls['service'][2],calls['characteristic'][2],calls['bluetooth'][2]),(0xffe0,'0000ffe1-0000-1000-8000-00805f9b34fb',[0xa0,1,0xff]))
+        self.assertGreaterEqual(calls['serial'][1]-calls['copy'][1],550,'the wait step delays later steps')
+        p.wait_for_function("() => document.querySelector('#action-events').textContent.includes('clip saved to Downloads')",timeout=10000)
+        self.assertIn(sorted(name.rsplit('.',1)[1] for name in downloads),(['jpg','mp4'],['jpg','webm']),'one photo and one clip')
+        self.assertTrue(all(name.startswith('jev-cat-') for name in downloads),downloads)
+        p.locator('#action-cards .run-action').click()
+        p.wait_for_function("() => calls.some(c=>c[0]==='share')")
+        self.assertEqual(p.evaluate("calls.find(c=>c[0]==='share')[2]"),'Saw cat')
+        p.locator('#reset-actions').click()
+        p.wait_for_function("() => calls.some(c=>c[0]==='release')")
+        self.assertEqual(p.locator('#video').evaluate('n=>n.style.filter'),'','reset removes your filter')
+
+    def test_reset_cancels_waiting_steps_and_unsupported_steps_say_why(self):
+        p=self.page
+        p.add_init_script("window.calls=[];delete Navigator.prototype.vibrate;Object.defineProperty(navigator,'serial',{value:undefined});")
+        p.reload();p.locator('#key').fill('local-fixture-key');p.locator('#workflow-mode').select_option('actions');p.locator('#labels').fill('cat')
+        self.assertTrue(p.locator('#pair-serial').is_disabled());self.assertIn('Not available here',p.locator('#serial-state').inner_text())
+        self.build_action('Slow',[('vibrate',[]),('wait',[('Seconds','2')]),('serial',[('Text to send','late')])])
+        p.locator('#rule-label').fill('cat');p.locator('#rule-kind').select_option('custom:action-1');p.locator('#rule-save').click()
+        p.locator('#actions-enabled').check();p.locator('#start').click()
+        self.answer(('cat',));self.answer(('cat',))
+        p.wait_for_function("() => document.querySelector('#action-events').textContent.includes('Vibrate · this device has no vibration API')")
+        p.locator('#reset-actions').click()
+        p.wait_for_function("() => document.querySelector('#action-events').textContent.includes('remaining steps cancelled (reset)')",timeout=5000)
+        self.assertNotIn('Serial port write',p.locator('#action-events').inner_text(),'cancelled steps never run')
+
+    def test_notification_permission_is_requested_from_taps(self):
+        p=self.page
+        p.add_init_script("""window.asked=0;window.Notification=class {static permission='default';
+            static requestPermission(){window.asked++;Notification.permission='granted';return Promise.resolve('granted');}};""")
+        p.reload();p.locator('#workflow-mode').select_option('actions')
+        self.assertEqual(p.locator('#notification-state').inner_text(),'Not allowed yet')
+        self.assertTrue(p.locator('#test-notification').is_disabled())
+        p.locator('#allow-notifications').click()
+        p.wait_for_function("() => document.querySelector('#notification-state').textContent==='Allowed ✓'")
+        self.assertEqual(p.evaluate('asked'),1)
+        self.assertTrue(p.locator('#test-notification').is_enabled());self.assertTrue(p.locator('#allow-notifications').is_disabled())
+        self.assertTrue(p.evaluate("navigator.serviceWorker.getRegistration().then(r=>!!r)"),'a service worker is registered for Android/home-screen notifications')
+        # Choosing a notification step also asks (it is a tap), without a separate button.
+        p.evaluate("Notification.permission='default'")
+        p.locator('#action-steps li').first.get_by_label('Step 1',exact=True).select_option('speak')
+        p.locator('#action-steps li').first.get_by_label('Step 1',exact=True).select_option('notify')
+        p.wait_for_function('() => asked===2')
