@@ -1,16 +1,25 @@
 import {CompletionRate, FrameState, projectBox, snapshotSize} from './core.mjs';
 import {TrackingClient} from './tracking-client.mjs';
 import {ActionView} from './action-view.mjs';
+import {ControllerView} from './controller-view.mjs';
 const actions=new ActionView();
+const controller=new ControllerView();
 
 const $ = id => document.getElementById(id);
 const video=$('video'), photo=$('photo'), stage=$('stage');
 const actionMode=()=>$('workflow-mode').value==='actions';
+// Controller: on-device gesture tracking drives mini-games. No recognition requests.
+const controllerMode=()=>$('workflow-mode').value==='controller';
 function workflowUI() {
-  const active=actionMode();
+  const active=actionMode(), game=controllerMode();
   document.querySelector('.visual-actions').hidden=!active;
-  document.querySelectorAll('.tracking-details').forEach(node=>node.hidden=active);
+  document.querySelectorAll('.tracking-details').forEach(node=>node.hidden=active||game);
   $('target-identifiers').hidden=!active;
+  document.querySelectorAll('.controls > section').forEach(section=>section.hidden=game?section.id!=='controller-panel':section.id==='controller-panel');
+  document.querySelector('.telemetry').hidden=game;$('results').hidden=game;
+  document.querySelector('.controls').setAttribute('aria-label',game?'Controller settings':'Detection settings');
+  controller.activate(game);
+  if(game){text('workflow-description','Controller · play mini games with hand or head gestures. Tracking runs on this device: no frames are sent and no API key is needed.');return;}
   text('confidence-help',active?'Only recognition at or above this threshold contributes to actions and target identifiers.':'Recognition seeds new tracks above this threshold. Supported pixel tracks survive weak recognition.');
   text('cadence-help',active?'Recognition target · one request at a time · 640 px snapshots. Each request captures the native video directly; no tracking worker, pixel sampling or live boxes.':'Recognition target, not tracking FPS. One request at a time · 640 px snapshots. Local pixel tracking between requests; live recognition-only boxes expire after 350 ms from capture, still-image boxes after 4s. Tracks need revalidation within 10s.');
   text('workflow-description',active?'Actions · image recognition only. Native preview and optional local reactions; no pixel tracking or box overlays.':'Detection and local pixel tracking · measured boxes between recognition requests. Actions do not run.');
@@ -65,7 +74,7 @@ function backoff() { failures=Math.min(failures+1,5); retryAt=performance.now()+
 function status(message, kind='') { text('status',message); const name=`state-badge ${kind}`; if($('badge').className!==name) $('badge').className=name; }
 function liveStatus() {
   if(document.hidden) return;
-  status('Camera live','live'); text('stage-note',actionMode()?'LIVE PREVIEW · ACTIONS / RECOGNITION ONLY':`LIVE PREVIEW · ${tracking.state.toUpperCase()}`);
+  status('Camera live','live'); text('stage-note',controllerMode()?'LIVE PREVIEW · GESTURES TRACKED ON THIS DEVICE · NO FRAMES SENT':actionMode()?'LIVE PREVIEW · ACTIONS / RECOGNITION ONLY':`LIVE PREVIEW · ${tracking.state.toUpperCase()}`);
 }
 function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('tracked-count','0'); text('age','—'); text('results',actionMode()?'No recognition yet. Actions use captured recognition only; no current locations.':'No detections yet. Camera mode can track visually supported objects.'); }
 function reset() { geometryCutoff=0;actions.reset();frame.reset();tracking.engaged=false;tracking.reset();lastVideoFrame=-1;lastTrackingCapture=null;lastSample=0; rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
@@ -84,14 +93,14 @@ function stopTracking() {
   clearInterval(sampleTimer);sampleTimer=null;clearTimeout(sampleRetry);sampleRetry=null;tracking.close();
 }
 function startTracking() {
-  if(actionMode()||!running||!stream||samplingActive)return;
+  if(actionMode()||controllerMode()||!running||!stream||samplingActive)return;
   samplingActive=true;watchVideo();tracking.start();
   // Presented-frame callbacks and worker replies drive sampling. A 20 ms poll is
   // only needed by browsers without requestVideoFrameCallback.
   if(typeof video.requestVideoFrameCallback!=='function')sampleTimer=setInterval(sample,20);
 }
 function stop() {
-  running=false;stopTracking();reset(); $('results').setAttribute('aria-busy','false');
+  running=false;stopTracking();reset();controller.detach(); $('results').setAttribute('aria-busy','false');
   if(stream) stream.getTracks().forEach(track=>track.stop());
   stream=null; video.srcObject=null;
   $('empty').hidden=!!uploaded; video.hidden=true; photo.hidden=!uploaded;
@@ -124,7 +133,7 @@ function drawSnapshot(source,w,h) {
   snapshotContext.drawImage(source,0,0,size.width,size.height);
 }
 function sample() {
-  if(actionMode()||!running||document.hidden||!tracking.ready||tracking.busy||video.readyState<2)return;
+  if(actionMode()||controllerMode()||!running||document.hidden||!tracking.ready||tracking.busy||video.readyState<2)return;
   const now=performance.now();
   const mediaFrame=videoFrame(now);
   if(mediaFrame===null||mediaFrame===lastVideoFrame)return;
@@ -136,13 +145,13 @@ function sample() {
 }
 function schedule() {
   clearTimeout(timer);
-  if(running && stream && !pending && !document.hidden) {
+  if(running && stream && !pending && !document.hidden && !controllerMode()) {
     const elapsed=lastCapture===null?Infinity:performance.now()-lastCapture;
     timer=setTimeout(()=>detect(false),Math.max(0,Number($('cadence').value)-elapsed,retryAt-performance.now()));
   }
 }
 async function detect(single) {
-  if(pending || (!single && (!running || document.hidden))) return;
+  if(pending || (!single && (!running || document.hidden || controllerMode()))) return;
   if(!single && performance.now()<retryAt) {schedule();return;}
   const epoch=frame.epoch, actionGeneration=actions.generation;
   let payload,capture=null,captured,encoded,timeout;
@@ -211,13 +220,14 @@ async function detect(single) {
   }
 }
 async function start() {
-  try {credentials();} catch(e) {fail(e.message);return;}
+  const game=controllerMode();
+  if(!game)try {credentials();} catch(e) {fail(e.message);return;}
   stop(); clearError(); running=true; const epoch=frame.epoch;
   let openingStream=null;
   status('Opening camera…','busy'); updateButtons();
   try {
     if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera requires HTTPS or localhost. You can use image upload instead.');
-    const next=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720},facingMode:'environment'},audio:false});
+    const next=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720},facingMode:game?'user':'environment'},audio:false});
     if(epoch!==frame.epoch || !running) {next.getTracks().forEach(t=>t.stop());return;}
     openingStream=next;stream=next; video.srcObject=stream; video.hidden=false; photo.hidden=true; $('empty').hidden=true;
     // Install source cleanup before play() yields: workflow epochs may change
@@ -225,7 +235,8 @@ async function start() {
     next.getVideoTracks()[0].addEventListener('ended',()=>{if(running&&stream===next){stop();fail('Camera disconnected. Reconnect and Start again.');}});
     await video.play();
     if(stream!==next || !running) return;
-    $('source-label').textContent='LIVE CAMERA'; liveStatus();
+    $('source-label').textContent=game?'FRONT CAMERA · ON DEVICE · NOTHING SENT':'LIVE CAMERA'; liveStatus();
+    if(game){controller.attach();return;}
     startTracking();
     detect(false);
   } catch(e) {
@@ -303,7 +314,12 @@ function render() {
   }
 }
 $('tracking-details').parentElement.addEventListener('toggle',()=>render());
+let workflow=$('workflow-mode').value;
 $('workflow-mode').addEventListener('change',()=>{
+  const was=workflow;workflow=$('workflow-mode').value;
+  // The controller uses the front camera and sends nothing; switching to or
+  // from it releases the camera so the other workflow starts from a clean slate.
+  if(was!==workflow&&(was==='controller'||workflow==='controller')){const live=running;if(live)stop();workflowUI();if(live)status('Workflow updated · Start camera');return;}
   // A permission promise has no stream to retain. Cancel its epoch and let the
   // late result stop its tracks, just like editing targets while opening camera.
   if(running&&!stream){stop();workflowUI();status('Workflow updated · Start camera');return;}

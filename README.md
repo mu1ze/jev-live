@@ -1,6 +1,6 @@
 # Jev Live
 
-A dependency-free Python HTTP gateway and vanilla browser dashboard with two exclusive workflows: **Detection / Tracking** and **Actions**. Jev 1.14.0 recognizes requested targets; only Detection / Tracking uses a dedicated OpenCV worker to follow measured movement between responses. No simulated detections are shipped in the app. Test fixtures exist only under `tests/`.
+A dependency-free Python HTTP gateway and vanilla browser dashboard with three exclusive workflows: **Detection / Tracking**, **Actions** and **Controller** (gesture mini games). Jev 1.14.0 recognizes requested targets; only Detection / Tracking uses a dedicated OpenCV worker to follow measured movement between responses. No simulated detections are shipped in the app. Test fixtures exist only under `tests/`.
 
 ## Run
 
@@ -56,7 +56,7 @@ All POSTs require an exact matching `Origin`; no CORS is enabled. Direct local H
 
 ## Behavior and billing
 
-### One app, two exclusive workflows
+### One app, three exclusive workflows
 
 Use the top-level **Workflow** selector (`#workflow-mode`):
 
@@ -81,8 +81,12 @@ Use the top-level **Workflow** selector (`#workflow-mode`):
   tabs, target/source/confidence and action-setting resets keep their existing
   freshness and effect-reset contracts. A failed playback startup releases the
   retained stream even if the workflow changed during `video.play()`.
+- **Controller** (`controller`) needs no key and sends no requests: the front
+  camera feeds an on-device gesture tracker that plays mini games (see
+  [Controller](#controller-gesture-mini-games)). Switching to or from it while
+  the camera runs stops the camera; press Start camera again.
 
-The tracking details below apply only to Detection / Tracking. Both workflows
+The tracking details below apply only to Detection / Tracking. Both recognition workflows
 retain one request in flight, cadence/backoff, capture-time semantic freshness
 and the same authenticated gateway; there are no separate routes or apps.
 
@@ -347,6 +351,28 @@ UI verification selectors: `#actions-enabled`, `[data-preset="bottle"]`
 `#rule-save`, `#rule-cancel`, `#actions-sound`, `#actions-state`,
 `#video[data-action-filter="cool"]`, `#action-cards`, `#action-events > li`,
 `#reset-actions`, `#clear-action-events`.
+
+## Controller: gesture mini games
+
+Choose **Controller · gesture mini games** in the Workflow selector, press **Start camera**, then play with your hand or head. No API key is needed and nothing is sent: frames go only to an on-device tracker.
+
+| Input | Steer | Press |
+| --- | --- | --- |
+| **Hand** | move your open palm | pinch thumb and index, or make a fist |
+| **Head** | turn or tilt your head (up/down: nod) | open your mouth |
+| **Touch / mouse / keys** | pointer, or arrows / WASD | click, tap, Space or Enter (no camera) |
+
+Games (original, all three run on the same controller state):
+
+- **Star Catch** · left/right. Catch stars (+1) and gems (+5), dodge rocks (three lives). Every 10-catch streak adds +5.
+- **Cave Glide** · up/down. Fly through the gaps (+1 per gate) and grab orbs (+3). Gaps narrow and speed rises over time.
+- **Bubble Pop** · point and press. Plain +1, gold +3, spiky −2. 45 seconds.
+
+Everything can be driven by gesture alone: press to start or play again; if the tracker loses you the game pauses (no lives lost) and resumes after a short countdown when you are back. **Recenter** makes your current hand position or head pose the middle of the screen (head mode also calibrates automatically on its first frames); **Sensitivity** scales how far you need to move. Best scores are kept in this browser only (`jev-live.controller.v1`). The camera preview is mirrored like a selfie and can be hidden behind the game.
+
+How it works: `gesture-worker.mjs` is a module worker that runs Google MediaPipe Hand Landmarker or Face Landmarker (GPU where available, CPU otherwise). The page sends it one downsized frame at a time (≤ 480 px, never queued) and gets 21 hand points or 9 face points back. `gestures.mjs` turns those into one controller state (One Euro smoothing, pinch/mouth hysteresis); `mini-games.mjs` holds deterministic game logic; `controller-view.mjs` draws to a canvas over the stage.
+
+Runtime and privacy: MediaPipe tasks-vision 1.1.1 (Apache-2.0) and the float16 hand/face models are pinned under `static/gesturevendor/` with source URLs and SHA-256 hashes in `asset-manifest.json`; there is no CDN dependency. The hand model is ~7.8 MB, the face model ~3.8 MB and the wasm runtime ~13.5 MB (≈4 MB gzipped); only the selected model loads, once, then browsers revalidate with ETags. The bundle contains optional usage logging to `odml.pa.googleapis.com`; the worker's own CSP (`connect-src 'self'`) blocks it, and the page's CSP still forbids wasm. Expect ~30 tracked frames/s on a recent phone or laptop; this VM's software GPU manages ~4.
 
 ## Expanded target capacity
 

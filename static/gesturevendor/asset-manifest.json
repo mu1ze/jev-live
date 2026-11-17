@@ -1,0 +1,50 @@
+{
+  "package": "@mediapipe/tasks-vision",
+  "version": "1.1.1",
+  "license": "Apache-2.0; unmodified official distribution",
+  "telemetry": "The bundle can POST usage logs to odml.pa.googleapis.com; the gesture worker CSP (connect-src self) blocks it.",
+  "assets": [
+    {
+      "file": "vision_bundle.mjs",
+      "source": "https://registry.npmjs.org/@mediapipe/tasks-vision/-/tasks-vision-1.1.1.tgz#package/vision_bundle.mjs",
+      "sha256": "a84921e02321e582484c1f8126d344b5f33b791fa09c640a52e20ee8632068f1",
+      "bytes": 156139,
+      "gzipBytes": 45147
+    },
+    {
+      "file": "vision_wasm_module_internal.js",
+      "source": "https://registry.npmjs.org/@mediapipe/tasks-vision/-/tasks-vision-1.1.1.tgz#package/wasm/vision_wasm_module_internal.js",
+      "sha256": "539a4386fd12d0723d6e900ec80467d168ba7290dda2f79e77a2181b8e906115",
+      "bytes": 334166,
+      "gzipBytes": 81073
+    },
+    {
+      "file": "vision_wasm_module_internal.wasm",
+      "source": "https://registry.npmjs.org/@mediapipe/tasks-vision/-/tasks-vision-1.1.1.tgz#package/wasm/vision_wasm_module_internal.wasm",
+      "sha256": "3b57e4b55ac6346bf940212e3e11250b308a6a474077385e2f527b119cf74525",
+      "bytes": 13519940,
+      "gzipBytes": 3947792
+    },
+    {
+      "file": "hand_landmarker.task",
+      "source": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1",
+      "bytes": 7819105,
+      "gzipBytes": 5853799
+    },
+    {
+      "file": "face_landmarker.task",
+      "source": "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
+      "bytes": 3758596,
+      "gzipBytes": 3332617
+    },
+    {
+      "file": "LICENSE.mediapipe",
+      "source": "https://raw.githubusercontent.com/google-ai-edge/mediapipe/v0.10.26/LICENSE",
+      "sha256": "8707eef0533987efc5b155d64761eeb6e20793f50b9bd1a68dad1cf4719d0ed8",
+      "bytes": 12331,
+      "gzipBytes": 4323
+    }
+  ]
+}

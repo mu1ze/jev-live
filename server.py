@@ -187,7 +187,8 @@ class StaticCache:
     restart of the tracking worker no longer re-downloads 11 MB of OpenCV.
     """
 
-    COMPRESSIBLE = ('text/', 'application/json')
+    # Wasm and model files shrink by 25–70% too; they are compressed once, then cached.
+    COMPRESSIBLE = ('text/', 'application/json', 'application/wasm', 'application/octet-stream')
 
     def __init__(self, root):
         import threading
@@ -213,6 +214,17 @@ class StaticCache:
         with self.lock:
             self.entries[filename] = entry
         return entry
+
+
+GESTURE_VENDOR = {
+    'vision_bundle.mjs': 'text/javascript',
+    'vision_wasm_module_internal.js': 'text/javascript',
+    'vision_wasm_module_internal.wasm': 'application/wasm',
+    'hand_landmarker.task': 'application/octet-stream',
+    'face_landmarker.task': 'application/octet-stream',
+    'LICENSE.mediapipe': 'text/plain',
+    'asset-manifest.json': 'application/json',
+}
 
 
 def accepts_gzip(header):
@@ -261,8 +273,11 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
         def end_headers(self):
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Referrer-Policy', 'no-referrer')
-            worker = urlsplit(self.path).path == prefix + '/tracking-worker.js'
-            policy = "default-src 'none'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'" if worker else "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+            path = urlsplit(self.path).path
+            worker = path == prefix + '/tracking-worker.js'
+            # The gesture worker may fetch only this app's own runtime and model files.
+            gesture = path == prefix + '/gesture-worker.mjs'
+            policy = "default-src 'none'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'" if worker else "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; worker-src 'none'" if gesture else "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
             self.send_header('Content-Security-Policy', policy)
             self.send_header('Permissions-Policy', 'camera=(self), microphone=()')
             super().end_headers()
@@ -336,6 +351,10 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
                 static_routes['/' + name] = (name, 'text/javascript')
             for name in ('opencv.js', 'LICENSE.opencv', 'COPYRIGHT.opencv', 'asset-manifest.json'):
                 static_routes['/trackingvendor/' + name] = ('trackingvendor/' + name, 'text/javascript' if name.endswith('.js') else 'text/plain')
+            for name in ('gesture-worker.mjs', 'gestures.mjs', 'mini-games.mjs', 'controller-view.mjs', 'gesture-client.mjs'):
+                static_routes['/' + name] = (name, 'text/javascript')
+            for name, mime in GESTURE_VENDOR.items():
+                static_routes['/gesturevendor/' + name] = ('gesturevendor/' + name, mime)
             route = parsed.path[len(prefix):] if parsed.path.startswith(prefix + '/') else None
             if route in static_routes:
                 filename, mime = static_routes[route]
