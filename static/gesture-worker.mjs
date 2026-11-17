@@ -2,6 +2,10 @@
    it may only fetch this app's own files, so frames, landmarks and the bundle's
    optional usage logging never leave the device. */
 import {HandLandmarker, FaceLandmarker} from './gesturevendor/vision_bundle.mjs';
+// MediaPipe clears self.ModuleFactory after building each model, and a module
+// script only runs once per worker, so keep our own reference and restore it
+// before every build (GPU→CPU fallback, switching hand↔face).
+import ModuleFactory from './gesturevendor/vision_wasm_module_internal.js';
 
 const fileset={
   wasmLoaderPath:new URL('gesturevendor/vision_wasm_module_internal.js',self.location.href).href,
@@ -14,18 +18,22 @@ const models={}, loading={};
 let lastTimestamp=0;
 
 async function create(mode,delegate) {
+  self.ModuleFactory=ModuleFactory;
   const options={baseOptions:{modelAssetPath:`gesturevendor/${mode==='hand'?'hand':'face'}_landmarker.task`,delegate},runningMode:'VIDEO'};
   if(mode==='hand')return HandLandmarker.createFromOptions(fileset,{...options,numHands:1,minHandDetectionConfidence:.5,minHandPresenceConfidence:.5,minTrackingConfidence:.5});
   return FaceLandmarker.createFromOptions(fileset,{...options,numFaces:1,outputFaceBlendshapes:false,outputFacialTransformationMatrixes:false});
 }
-function load(mode) {
+function load(mode,only) {
   // GPU is much faster where WebGL2 is available in workers; CPU always works.
-  return loading[mode]??=(async()=>{
-    for(const delegate of typeof OffscreenCanvas==='undefined'?['CPU']:['GPU','CPU']) {
+  const order=only==='CPU'||typeof OffscreenCanvas==='undefined'?['CPU']:only==='GPU'?['GPU']:['GPU','CPU'];
+  const pending=loading[mode]??=(async()=>{
+    for(const delegate of order) {
       try {models[mode]=await create(mode,delegate);return delegate;}
-      catch(error) {if(delegate==='CPU')throw error;}
+      catch(error) {if(delegate===order.at(-1))throw error;}
     }
   })();
+  pending.catch(()=>{if(loading[mode]===pending)delete loading[mode];}); // allow a retry
+  return pending;
 }
 
 function pack(points,indices) {
@@ -37,7 +45,7 @@ function pack(points,indices) {
 onmessage=async({data:m})=>{
   try {
     if(m.type==='load') {
-      const delegate=await load(m.mode);
+      const delegate=await load(m.mode,m.delegate);
       postMessage({type:'ready',mode:m.mode,delegate});return;
     }
     if(m.type==='frame') {

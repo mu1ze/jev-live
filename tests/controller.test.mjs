@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {points, readHand, readHead, GestureInput, OneEuro, FACE, PINCH_ON, PINCH_OFF} from '../static/gestures.mjs';
+import {points, readHand, readHead, GestureInput, OneEuro, FACE, PINCH_ON, PINCH_OFF, controls, activeControl} from '../static/gestures.mjs';
 import {Session, StarCatch, CaveGlide, BubblePop, GAMES, rng} from '../static/mini-games.mjs';
 
 // Real MediaPipe output for tests/fixtures/hand-thumb-up.jpg (image coordinates).
@@ -170,4 +170,30 @@ test('games are deterministic for a seed and survive long random play',()=>{
     assert.deepEqual(play(11),play(11),Game.id);
     const [,score]=play(11);assert.ok(Number.isFinite(score)&&score>=0,Game.id);
   }
+});
+
+test('controls guide: every input lists steer and press, described for the game',()=>{
+  for(const mode of ['hand','head','pointer']) {
+    const list=controls(mode,'x');
+    assert.equal(list[0].id,'steer',mode);
+    assert.ok(list.every(c=>c.icon&&c.gesture&&c.does),mode);
+    assert.equal(new Set(list.map(c=>c.id)).size,list.length,'ids are unique');
+  }
+  assert.equal(controls('hand','x')[0].does,'Move left / right');
+  assert.equal(controls('hand','y')[0].does,'Move up / down');
+  assert.equal(controls('head','y')[0].gesture,'Nod up / down');
+  assert.equal(controls('hand','xy','Pop · start')[1].does,'Pop · start');
+});
+
+test('active control follows what the tracker sees',()=>{
+  assert.equal(activeControl('hand',{present:false}),'');
+  assert.equal(activeControl('hand',null),'');
+  const g=new GestureInput('hand');
+  assert.equal(activeControl('hand',g.update(hand(),0)),'steer');
+  assert.equal(activeControl('hand',g.update(hand({pinch:true}),33)),'pinch');
+  const fist=new GestureInput('hand');
+  assert.equal(activeControl('hand',fist.update(thumbUp,0)),'fist','the real thumbs-up photo lights the fist control');
+  const head=new GestureInput('head');
+  assert.equal(activeControl('head',head.update(face({mouth:.05}),0)),'mouth');
+  assert.equal(activeControl('pointer',{present:true,action:true}),'press');
 });

@@ -118,3 +118,31 @@ export class GestureInput {
     return s;
   }
 }
+
+// What each control does, for the on-screen guide. `axes` is the game's axes
+// ('x', 'y' or 'xy') so steering is described the way this game uses it.
+const STEER={x:'Move left / right',y:'Move up / down',xy:'Aim'};
+export function controls(mode,axes='xy',pressUse='Start · resume') {
+  const steer=STEER[axes]||STEER.xy;
+  if(mode==='hand')return [
+    {id:'steer',icon:'✋',gesture:'Open hand',does:steer},
+    {id:'pinch',icon:'🤏',gesture:'Pinch',does:pressUse},
+    {id:'fist',icon:'✊',gesture:'Fist',does:pressUse},
+  ];
+  if(mode==='head')return [
+    {id:'steer',icon:'🙂',gesture:axes==='y'?'Nod up / down':axes==='x'?'Turn or tilt':'Turn, tilt, nod',does:steer},
+    {id:'mouth',icon:'😮',gesture:'Open mouth',does:pressUse},
+    {id:'recenter',icon:'🎯',gesture:'Recenter button',does:'Reset the middle'},
+  ];
+  return [
+    {id:'steer',icon:'🖱️',gesture:axes==='y'?'Pointer · ↑ ↓ · W S':axes==='x'?'Pointer · ← → · A D':'Pointer · arrows · WASD',does:steer},
+    {id:'press',icon:'👆',gesture:'Click · tap · Space',does:pressUse},
+  ];
+}
+// Which control the player is using right now ('' when nobody is seen).
+export function activeControl(mode,state) {
+  if(!state?.present)return '';
+  if(mode==='hand')return state.action?(state.pose==='fist'?'fist':'pinch'):'steer';
+  if(mode==='head')return state.action?'mouth':'steer';
+  return state.action?'press':'steer';
+}

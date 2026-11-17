@@ -276,8 +276,10 @@ def create_server(port=8788, api_key='', access_token='', prefix='', transport=N
             path = urlsplit(self.path).path
             worker = path == prefix + '/tracking-worker.js'
             # The gesture worker may fetch only this app's own runtime and model files.
+            # worker-src must allow 'self': Firefox checks a module worker's own
+            # static imports against it, so 'none' stops the tracker from loading.
             gesture = path == prefix + '/gesture-worker.mjs'
-            policy = "default-src 'none'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'" if worker else "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; worker-src 'none'" if gesture else "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+            policy = "default-src 'none'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'" if worker else "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; worker-src 'self'" if gesture else "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
             self.send_header('Content-Security-Policy', policy)
             self.send_header('Permissions-Policy', 'camera=(self), microphone=()')
             super().end_headers()

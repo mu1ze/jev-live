@@ -15,7 +15,7 @@ export class GestureClient {
       try {this.worker=this.factory();}
       catch {this.onState('failed','This browser cannot start the gesture tracker.');return;}
       this.worker.onmessage=({data})=>this.message(data);
-      this.worker.onerror=event=>{event.preventDefault?.();this.fail('The gesture tracker could not load.');};
+      this.worker.onerror=event=>{event.preventDefault?.();this.fail(`The gesture tracker could not load in this browser${event.message?` (${String(event.message).slice(0,120)})`:''}.`);};
     }
     this.onState('loading',mode==='hand'?'Loading hand tracker…':'Loading face tracker…');
     this.worker.postMessage({type:'load',mode});
@@ -26,7 +26,7 @@ export class GestureClient {
     if(data.mode!==this.mode)return; // a reply for a mode we already left
     if(data.type==='ready'){this.ready=true;this.stats.delegate=data.delegate;this.onState('ready',`${data.mode==='hand'?'Hand':'Face'} tracker ready · ${data.delegate}`);return;}
     if(data.type==='failure') {
-      if(data.stage==='load'){this.fail('The gesture tracker could not start in this browser.');return;}
+      if(data.stage==='load'){this.fail(`The ${data.mode==='hand'?'hand':'face'} tracker could not start in this browser${data.message?` (${data.message})`:''}.`);return;}
       this.busy=false;this.inflight=null;return;
     }
     if(data.type==='result'&&this.inflight?.id===data.id) {

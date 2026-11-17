@@ -1,5 +1,5 @@
-import {GestureInput, INPUTS, HAND_LINKS, FACE} from './gestures.mjs';
-import {GAMES, Session, COLORS} from './mini-games.mjs';
+import {GestureInput, INPUTS, HAND_LINKS, FACE, controls, activeControl} from './gestures.mjs';
+import {GAMES, Session, COLORS, roundRect} from './mini-games.mjs';
 import {GestureClient} from './gesture-client.mjs';
 import {ActionAudio} from './action-audio.mjs';
 
@@ -7,6 +7,12 @@ const $=id=>document.getElementById(id);
 const BEST_KEY='jev-live.controller.v1';
 const SOUNDS={score:[880,60,1],bonus:[1175,70,2],hurt:[196,180,1],over:[147,260,2]};
 const STALE_MS=700; // no tracker answer for this long counts as "player not seen"
+const EMOJI='"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
+const TIPS={
+  hand:'Keep your whole hand in view, about an arm’s length from the camera.',
+  head:'Sit facing the camera. Press Recenter if steering drifts.',
+  pointer:'Click or tap the game first so it receives your keys.',
+};
 
 function loadBest() {
   try {const saved=JSON.parse(localStorage.getItem(BEST_KEY)||'{}');return saved?.version===1&&saved.best&&typeof saved.best==='object'?saved.best:{};}
@@ -25,6 +31,7 @@ export class ControllerView {
     this.pointer={x:.5,y:.5,down:false,pressed:false,keys:new Set()};
     this.session=new Session('catch');this.best=loadBest();this.audio=new ActionAudio();
     this.client=new GestureClient((points,handedness,now)=>this.result(points,now),(state,message)=>{this.tracker={state,message};this.panel(performance.now(),true);});
+    this.legend=$('controller-legend');this.activeId=null;this.using='';
     this.wire();this.selectGame('catch');this.setMode(this.mode);
   }
 
@@ -86,17 +93,37 @@ export class ControllerView {
   setMode(mode) {
     this.mode=mode;this.input.setMode(mode);this.input.sensitivity=Number($('controller-sensitivity').value);this.pressLatch=false;
     this.canvas.dataset.input=mode;$('controller-recenter').disabled=mode==='pointer';
-    $('controller-input-help').textContent=`${INPUTS[mode].move} to steer. ${INPUTS[mode].press} to press.`;
+    $('controller-input-help').textContent=TIPS[mode];
     if(mode==='pointer'){this.client.close();this.tracker={state:'idle',message:''};}
     else if(this.camera)this.client.start(mode);
     this.session.select(this.session.Game.id);
+    this.renderLegend();
     this.panel(performance.now(),true);
   }
   selectGame(id) {
     this.session.select(id);
     document.querySelectorAll('[data-game]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.game===this.session.Game.id)));
     $('game-help').textContent=this.session.Game.help;
+    this.renderLegend();
     this.panel(performance.now(),true);
+  }
+  // The controls for this input and game, as a list the panel and canvas share.
+  controls() {return controls(this.mode,this.session.Game.axes,this.session.Game.id==='pop'?'Pop · start':'Start · resume');}
+  renderLegend() {
+    if(!this.legend)return;
+    this.legend.replaceChildren(...this.controls().map(c=>{
+      const item=document.createElement('li');item.dataset.control=c.id;
+      const icon=document.createElement('span');icon.className='legend-icon';icon.textContent=c.icon;icon.setAttribute('aria-hidden','true');
+      const text=document.createElement('span');const b=document.createElement('b');b.textContent=c.gesture;const small=document.createElement('small');small.textContent=c.does;
+      text.append(b,small);item.append(icon,text);return item;
+    }));
+    this.activeId=null;
+  }
+  // Light up the control the player is using now, so they see it register.
+  highlight(id) {
+    if(id===this.activeId||!this.legend)return;
+    this.activeId=id;
+    for(const item of this.legend.children)item.toggleAttribute('data-active',item.dataset.control===id);
   }
   playButton() {
     const s=this.session;
@@ -139,6 +166,8 @@ export class ControllerView {
     const events=this.session.update(dt,input);
     for(const event of events)if(SOUNDS[event])this.audio.beep(...SOUNDS[event]);
     if(this.session.state!==before)this.stateChanged(before);
+    this.using=activeControl(this.mode,this.mode==='pointer'||this.camera&&this.client.ready?input:null);
+    this.highlight(this.using);
     this.draw(input,now);
     this.panel(now);
   }
@@ -171,6 +200,7 @@ export class ControllerView {
     s.game.draw(ctx,h);
     this.drawHud(ctx,w,h);
     if(s.state!=='playing')this.drawOverlay(ctx,w,h,now);
+    else this.drawLive(ctx,input,w);
     // One-axis games show position with their own piece; pointing games need a cursor.
     if(s.Game.axes==='xy'&&(input.present||this.mode==='pointer'))this.drawCursor(ctx,input,w,h);
   }
@@ -213,11 +243,50 @@ export class ControllerView {
     else {lines.push(s.Game.help,`${info.move} to steer · ${info.press.toLowerCase()} to start`);if(this.mode!=='pointer'&&!this.input.state.present)lines.push(info.missing);}
     ctx.fillStyle='#0b0f0dc2';ctx.fillRect(0,0,w,h);
     ctx.textAlign='center';ctx.fillStyle=COLORS.ACCENT;
-    const size=Math.max(18,Math.min(34,h*.07));
-    ctx.font=`650 ${size}px system-ui,sans-serif`;ctx.fillText(title,w/2,h*.42);
+    const size=Math.max(18,Math.min(34,h*.07)), cards=this.controls(), cardH=Math.max(78,Math.min(118,h*.24));
+    const showCards=h>=300&&w>=320;
+    const top=showCards?Math.max(size+12,h*.5-(size*1.1+lines.length*size*.65+cardH)/2):h*.42;
+    ctx.font=`650 ${size}px system-ui,sans-serif`;ctx.fillText(title,w/2,top);
     ctx.font=`450 ${Math.max(12,size*.48)}px system-ui,sans-serif`;ctx.fillStyle=COLORS.TEXT;
-    let y=h*.42+size*.9;
+    let y=top+size*.9;
     for(const line of lines)y+=wrap(ctx,line,w/2,y,w*.86);
+    if(showCards&&y+16+cardH<=h-8)this.drawCards(ctx,cards,w,y+16,cardH);
+  }
+  // Control cards: icon, gesture and what it does. The one in use lights up,
+  // so players can try a pinch (or open their mouth) before starting.
+  drawCards(ctx,cards,w,top,cardH) {
+    const gap=12, cardW=Math.min(190,(w*.9-gap*(cards.length-1))/cards.length), total=cardW*cards.length+gap*(cards.length-1);
+    let x=(w-total)/2;
+    ctx.textAlign='center';
+    for(const c of cards) {
+      const on=c.id===this.using;
+      roundRect(ctx,x,top,cardW,cardH,10);
+      ctx.fillStyle=on?'#c5ed9633':'#ffffff10';ctx.fill();
+      ctx.lineWidth=on?2.5:1;ctx.strokeStyle=on?COLORS.ACCENT:'#ffffff2e';ctx.stroke();
+      const icon=Math.min(cardH*.34,34), cx=x+cardW/2;
+      ctx.font=`${icon}px ${EMOJI}`;ctx.textBaseline='middle';ctx.fillStyle=COLORS.TEXT;ctx.fillText(c.icon,cx,top+cardH*.3);
+      ctx.textBaseline='alphabetic';
+      const label=Math.max(11,Math.min(15,cardH*.13));
+      ctx.font=`650 ${label}px system-ui,sans-serif`;ctx.fillStyle=on?COLORS.ACCENT:COLORS.TEXT;fit(ctx,c.gesture,cx,top+cardH*.66,cardW-12);
+      ctx.font=`450 ${label*.88}px system-ui,sans-serif`;ctx.fillStyle=COLORS.MUTED;fit(ctx,c.does,cx,top+cardH*.66+label*1.35,cardW-12);
+      x+=cardW+gap;
+    }
+  }
+  // While playing: a small pill at the top shows what the tracker sees and
+  // whether the button is pressed.
+  drawLive(ctx,input,w) {
+    if(this.mode==='pointer')return; // the pointer is its own feedback
+    const c=this.controls().find(item=>item.id===this.using);
+    const text=c?`${c.gesture}${input.action?' · PRESS':''}`:INPUTS[this.mode].missing;
+    ctx.font='600 13px system-ui,sans-serif';
+    const iconW=c?22:0, pw=ctx.measureText(text).width+iconW+26, ph=28, x=(w-pw)/2, y=12;
+    roundRect(ctx,x,y,pw,ph,ph/2);
+    ctx.fillStyle=input.action?'#c5ed96d9':'#0b0f0dbf';ctx.fill();ctx.lineWidth=1;ctx.strokeStyle=c?COLORS.ACCENT:COLORS.DANGER;ctx.stroke();
+    ctx.textBaseline='middle';ctx.textAlign='left';
+    if(c){ctx.font=`15px ${EMOJI}`;ctx.fillText(c.icon,x+12,y+ph/2+1);}
+    ctx.font='600 13px system-ui,sans-serif';ctx.fillStyle=input.action?'#0b0f0d':c?COLORS.TEXT:COLORS.DANGER;
+    ctx.fillText(text,x+13+iconW,y+ph/2+1);
+    ctx.textBaseline='alphabetic';
   }
 
   // ---- Side panel ----
@@ -238,6 +307,11 @@ export class ControllerView {
   }
 }
 
+function fit(ctx,text,x,y,max) {
+  let t=text;
+  while(t.length>3&&ctx.measureText(t).width>max)t=t.slice(0,-2)+'…';
+  ctx.fillText(t,x,y);
+}
 function wrap(ctx,text,x,y,max) {
   const words=text.split(' ');let line='';const lines=[];
   for(const word of words){const next=line?`${line} ${word}`:word;if(ctx.measureText(next).width>max&&line){lines.push(line);line=word;}else line=next;}

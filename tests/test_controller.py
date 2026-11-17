@@ -94,6 +94,8 @@ class ControllerBrowserTests(unittest.TestCase):
         readout = p.locator('#controller-readout').inner_text()
         self.assertIn('PRESSED', readout)
         self.assertIn('fist', readout)
+        # The controls legend lights up the gesture the tracker recognised.
+        p.wait_for_function('() => document.querySelector("#controller-legend [data-control=fist]").hasAttribute("data-active")', timeout=10000)
         p.wait_for_function('() => document.querySelector("#game-play").textContent === "Pause"', timeout=10000)
         self.assertEqual(p.locator('#game-announce').inner_text(), 'Star Catch started')
         # The hand leaves the frame: the game pauses instead of losing lives.
@@ -103,10 +105,40 @@ class ControllerBrowserTests(unittest.TestCase):
         p.wait_for_function('() => document.querySelector("#game-play").textContent === "Resume"', timeout=20000)
         self.assertIn('Paused', p.locator('#game-announce').inner_text())
 
+    def test_controls_legend_matches_input_and_game(self):
+        p = self.page
+        legend = p.locator('#controller-legend li')
+        self.assertEqual(legend.count(), 3)
+        self.assertIn('Open hand', legend.nth(0).inner_text())
+        self.assertIn('Move left / right', legend.nth(0).inner_text())
+        self.assertIn('Pinch', legend.nth(1).inner_text())
+        p.locator('[data-game="glide"]').click()
+        self.assertIn('Move up / down', legend.nth(0).inner_text())
+        p.locator('#controller-input').select_option('head')
+        self.assertIn('Open mouth', p.locator('#controller-legend').inner_text())
+        p.locator('#controller-input').select_option('pointer')
+        self.assertEqual(legend.count(), 2)
+        self.assertIn('Space', legend.nth(1).inner_text())
+
+    def test_worker_builds_a_second_model_and_the_cpu_fallback(self):
+        # MediaPipe clears self.ModuleFactory after each build; the worker must
+        # restore it or switching hand→head and the GPU→CPU fallback both fail.
+        result = self.page.evaluate("""async () => {
+            const w = new Worker('gesture-worker.mjs', {type: 'module'});
+            const ask = message => new Promise(resolve => { w.onmessage = e => resolve(e.data); w.onerror = e => resolve({type: 'error'}); setTimeout(() => resolve({type: 'timeout'}), 60000); w.postMessage(message); });
+            const replies = [await ask({type: 'load', mode: 'hand'}), await ask({type: 'load', mode: 'face', delegate: 'CPU'})];
+            w.terminate();
+            return replies.map(r => r.type + ':' + (r.delegate || r.message));
+        }""")
+        self.assertEqual(result[0][:6], 'ready:')
+        self.assertEqual(result[1], 'ready:CPU')
+
     def test_head_mode_loads_the_face_tracker(self):
         p = self.page
-        p.locator('#controller-input').select_option('head')
         p.locator('#start').click()
+        self.wait_ready('Hand')
+        # Switching input while the camera runs reuses the same worker.
+        p.locator('#controller-input').select_option('head')
         self.wait_ready('Face')
         p.wait_for_function('() => /· [1-9]\\d* fps/.test(document.querySelector("#controller-state").textContent)', timeout=30000)
         self.assertIn('Face the camera', p.locator('#controller-readout').inner_text())
@@ -145,6 +177,46 @@ class ControllerBrowserTests(unittest.TestCase):
         self.assertEqual(p.locator('#game-score').inner_text(), 'Score 0 · Best 12')
 
 
+def engine_available(name):
+    if sync_playwright is None:
+        return False
+    try:
+        with sync_playwright() as pw:
+            browser = getattr(pw, name).launch(headless=True)
+            browser.close()
+            return True
+    except Exception:
+        return False
+
+
+class ControllerEngineTests(unittest.TestCase):
+    """The tracker worker must load in Firefox and Safari's engine too, each
+    building both models in one worker (WebKit here falls back to CPU)."""
+    def check(self, engine):
+        if not engine_available(engine):
+            self.skipTest(f'Install Playwright {engine} (and its system libraries) to run this check')
+        harness = server_tests.HTTPTests()
+        with harness.running(), sync_playwright() as pw:
+            browser = getattr(pw, engine).launch(headless=True)
+            page = browser.new_page()
+            page.goto(f'http://127.0.0.1:{harness.port}/')
+            replies = page.evaluate("""async () => {
+                const w = new Worker('gesture-worker.mjs', {type: 'module'});
+                const ask = message => new Promise(resolve => { w.onmessage = e => resolve(e.data.type); w.onerror = () => resolve('worker error'); setTimeout(() => resolve('timeout'), 60000); w.postMessage(message); });
+                const replies = [await ask({type: 'load', mode: 'hand'}), await ask({type: 'load', mode: 'face'})];
+                w.terminate();
+                return replies;
+            }""")
+            browser.close()
+        self.assertEqual(replies, ['ready', 'ready'])
+
+    def test_trackers_load_in_firefox(self):
+        self.check('firefox')
+
+    def test_trackers_load_in_webkit(self):
+        self.check('webkit')
+
+
 class ControllerServingTests(unittest.TestCase):
     def test_worker_csp_and_vendored_runtime(self):
         harness = server_tests.HTTPTests()
@@ -153,6 +225,7 @@ class ControllerServingTests(unittest.TestCase):
             self.assertEqual(status, 200)
             policy = headers['Content-Security-Policy']
             self.assertIn("connect-src 'self'", policy, 'the worker can only fetch this app: telemetry is blocked')
+            self.assertIn("worker-src 'self'", policy, "Firefox checks a module worker's own imports against worker-src")
             self.assertIn("'wasm-unsafe-eval'", policy)
             self.assertNotIn("'unsafe-eval'", policy.replace("'wasm-unsafe-eval'", ''))
             page_policy = harness.request('GET', '/')[1]['Content-Security-Policy']
