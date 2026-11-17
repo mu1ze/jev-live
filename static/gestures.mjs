@@ -20,39 +20,59 @@ export function points(flat) {
   return list;
 }
 const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+const dist3=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y,(a.z||0)-(b.z||0));
 const clamp=(v,lo=0,hi=1)=>Math.min(hi,Math.max(lo,v));
 
 // Hand pose from 21 landmarks: palm centre, pinch ratio and finger extension.
-export function readHand(p) {
-  const size=dist(p[0],p[9])||1e-6;
-  const extended=[[8,6],[12,10],[16,14],[20,18]].map(([tip,pip])=>dist(p[tip],p[0])>dist(p[pip],p[0])*1.12);
+// `world` (MediaPipe's metric 3D points) gives the hand's true shape, so a
+// pinch or fist reads the same whether the hand is tilted, turned or near the
+// frame edge; without it the image points are used.
+export function readHand(p,world=null) {
+  const shape=world||p, d=world?dist3:dist;
+  const size=d(shape[0],shape[9])||1e-6;
+  const extended=[[8,6],[12,10],[16,14],[20,18]].map(([tip,pip])=>d(shape[tip],shape[0])>d(shape[pip],shape[0])*1.12);
   const count=extended.filter(Boolean).length;
-  const pinch=dist(p[4],p[8])/size;
+  const pinch=d(shape[4],shape[8])/size;
   // Palm centre is steady while the fingers pinch or curl.
   const palm={x:(p[0].x+p[5].x+p[9].x+p[17].x)/4,y:(p[0].y+p[5].y+p[9].y+p[17].y)/4};
   const pose=count===0?'fist':count>=4?'open':extended[0]&&count===1?'point':extended[0]&&extended[1]&&count===2?'peace':'other';
   return {palm,pinch,pose,size};
 }
 
-// Head pose from the face subset: yaw/pitch are ~-1…1 (nose position inside
-// the face box), roll is radians, mouth is lip gap / face height.
+// Head pose from the face subset (fallback when the 3D pose is missing).
+// Everything is measured against the eyes, cheeks and nose, never the chin or
+// lips, so opening the mouth does not read as a nod. yaw/pitch are roughly
+// radians (+ = toward screen right / down in the mirrored view), roll is
+// radians, mouth is lip gap / outer-eye distance.
 export function readHead(p) {
   const [left,right]=p[FACE.cheekA].x<p[FACE.cheekB].x?[p[FACE.cheekA],p[FACE.cheekB]]:[p[FACE.cheekB],p[FACE.cheekA]];
   const [eyeL,eyeR]=p[FACE.eyeA].x<p[FACE.eyeB].x?[p[FACE.eyeA],p[FACE.eyeB]]:[p[FACE.eyeB],p[FACE.eyeA]];
-  const nose=p[FACE.nose], top=p[FACE.forehead], chin=p[FACE.chin];
-  const width=(right.x-left.x)||1e-6, height=(chin.y-top.y)||1e-6;
+  const nose=p[FACE.nose], width=(right.x-left.x)||1e-6, eyes=dist(eyeL,eyeR)||1e-6;
+  const eyeMid={x:(eyeL.x+eyeR.x)/2,y:(eyeL.y+eyeR.y)/2};
   return {
-    yaw:((nose.x-left.x)/width-.5)*2,
-    pitch:((nose.y-top.y)/height-.5)*2,
+    yaw:((nose.x-left.x)/width-.5)*1.8,
+    pitch:(nose.y-eyeMid.y)/eyes*1.5,
     roll:Math.atan2(eyeR.y-eyeL.y,eyeR.x-eyeL.x),
-    mouth:dist(p[FACE.lipTop],p[FACE.lipBottom])/height,
+    mouth:dist(p[FACE.lipTop],p[FACE.lipBottom])/eyes,
     nose,
   };
 }
 
-// One Euro filter: smooth when still, responsive when moving fast.
+// Head angles from MediaPipe's facial transformation matrix (column-major
+// 4×4, camera space: x = image right, y = up, z = toward the camera) plus the
+// jawOpen blendshape in pose[16]. The rotation is fitted mostly to the rigid
+// parts of the face, so talking or opening the mouth barely moves it.
+// yaw + = toward the mirrored screen's right, pitch + = looking down.
+export function readHeadPose(pose) {
+  const fx=pose[8], fy=pose[9], fz=pose[10]; // where the face points
+  return {yaw:Math.atan2(-fx,fz),pitch:Math.atan2(-fy,Math.hypot(fx,fz)),jaw:pose[16]};
+}
+
+// One Euro filter: smooth when still, responsive when moving fast. A high
+// beta keeps the aim within ~2% of the hand while moving and settles in ~30 ms
+// when it stops (the old 0.9 trailed by ~7% and crept for ~130 ms).
 export class OneEuro {
-  constructor(minCutoff=1.4,beta=.9,dCutoff=1) {Object.assign(this,{minCutoff,beta,dCutoff});this.reset();}
+  constructor(minCutoff=1,beta=8,dCutoff=1) {Object.assign(this,{minCutoff,beta,dCutoff});this.reset();}
   reset() {this.x=null;this.dx=0;this.t=0;}
   static alpha(cutoff,dt) {const tau=1/(2*Math.PI*cutoff);return 1/(1+tau/dt);}
   filter(value,t) {
@@ -66,20 +86,43 @@ export class OneEuro {
 }
 
 // Thresholds with hysteresis so a held gesture never flickers.
-export const PINCH_ON=.32, PINCH_OFF=.48, MOUTH_ON=.085, MOUTH_OFF=.055;
-const HEAD_GAIN=2.6, HAND_GAIN=1.7, LOST_MS=400;
+// Pinch is measured in 3D, so it can trigger just before the fingertips touch.
+export const PINCH_ON=.36, PINCH_OFF=.5, MOUTH_ON=.25, MOUTH_OFF=.15;
+// jawOpen blendshape: a smile showing teeth scores ~0.1–0.25, an open mouth 0.4+.
+export const JAW_ON=.35, JAW_OFF=.22;
+// Head angles (radians) that sweep the whole screen. Nodding has a smaller
+// comfortable range than turning, so it gets a shorter span.
+export const HEAD_SPAN={yaw:.7,roll:.8,pitch:.42};
+// HAND_REACH: the aim sits on the hand as drawn on screen; a little extra reach
+// means the screen edge is reached before the hand leaves the camera.
+export const HAND_REACH=1.25;
+const LOST_MS=400;
+// A pinch or fist moves the hand's landmarks, so a press is aimed where the
+// hand was just before it began, and the aim holds still briefly after.
+const PRESS_LOOKBACK_MS=90, PRESS_HOLD_MS=140;
 
 export class GestureInput {
-  constructor(mode='hand') {this.sensitivity=1;this.setMode(mode);}
+  constructor(mode='hand') {this.sensitivity=1;this.view={x:1,y:1};this.setMode(mode);}
+  // How the camera frame is scaled onto the screen (see handMap), so the aim
+  // lands on the hand as drawn. 1,1 = the frame exactly fills the screen.
+  setView(x,y) {this.view={x:x||1,y:y||1};}
+  // Camera point (mirrored, 0…1) → screen point (0…1) for hand mode. The
+  // controller view draws the camera and landmarks with this same mapping.
+  handMap(q) {
+    const c=this.center||{x:.5,y:.5}, g=HAND_REACH*this.sensitivity;
+    return {x:.5+(q.x-c.x)*g*this.view.x,y:.5+(q.y-c.y)*g*this.view.y};
+  }
   setMode(mode) {
     this.mode=mode;this.fx=new OneEuro();this.fy=new OneEuro();
     this.center=null;this.pressed=false;this.lastSeen=-Infinity;this.calibrating=mode==='head'?[]:null;
+    this.history=[];this.holdUntil=-Infinity;
     this.state={present:false,x:.5,y:.5,action:false,pressed:false,released:false,pose:'',detail:'',raw:null};
     return this.state;
   }
   recenter() {this.center=null;this.calibrating=[];}
-  // Feed one tracker result (null points = nothing found). Returns the state.
-  update(flat,now) {
+  // Feed one tracker result (null points = nothing found; world = optional
+  // metric hand points). Returns the state.
+  update(flat,now,world=null) {
     const was=this.pressed, s=this.state;
     s.pressed=s.released=false;
     if(!flat) {
@@ -90,31 +133,40 @@ export class GestureInput {
     const p=points(flat);this.lastSeen=now;s.present=true;s.raw=p;
     let rx,ry,press;
     if(this.mode==='hand') {
-      const h=readHand(p);
+      const h=readHand(p,world&&world.length>=63?points(world):null);
       const threshold=this.pressed?PINCH_OFF:PINCH_ON;
       press=h.pinch<threshold||h.pose==='fist';
       s.pose=press?(h.pose==='fist'?'fist':'pinch'):h.pose;
-      rx=h.palm.x;ry=h.palm.y;
-      if(this.calibrating){this.center={x:rx,y:ry};this.calibrating=null;}
-      const c=this.center||{x:.5,y:.5}, gain=HAND_GAIN*this.sensitivity;
-      rx=.5+(rx-c.x)*gain;ry=.5+(ry-c.y)*gain;
+      if(this.calibrating){this.center={x:h.palm.x,y:h.palm.y};this.calibrating=null;}
+      ({x:rx,y:ry}=this.handMap(h.palm));
       s.detail=`pinch ${h.pinch.toFixed(2)} · ${h.pose}`;
     } else {
-      const h=readHead(p);
-      press=h.mouth>(this.pressed?MOUTH_OFF:MOUTH_ON);
+      const face=readHead(p), pose=world&&world.length>=17?readHeadPose(world):null;
+      const h={yaw:pose?pose.yaw:face.yaw,pitch:pose?pose.pitch:face.pitch,roll:face.roll};
+      press=pose?pose.jaw>(this.pressed?JAW_OFF:JAW_ON):face.mouth>(this.pressed?MOUTH_OFF:MOUTH_ON);
       s.pose=press?'mouth open':Math.abs(h.roll)>.3?(h.roll>0?'tilt right':'tilt left'):'';
       // The first few frames define "straight ahead" for this player.
       if(this.calibrating) {
         this.calibrating.push(h);
-        if(this.calibrating.length>=6){const n=this.calibrating.length;this.center={x:this.calibrating.reduce((a,v)=>a+v.yaw,0)/n,y:this.calibrating.reduce((a,v)=>a+v.pitch,0)/n};this.calibrating=null;}
+        if(this.calibrating.length>=6){const n=this.calibrating.length, mean=key=>this.calibrating.reduce((a,v)=>a+v[key],0)/n;this.center={yaw:mean('yaw'),pitch:mean('pitch'),roll:mean('roll')};this.calibrating=null;}
       }
-      const c=this.center||{x:h.yaw,y:h.pitch}, gain=HEAD_GAIN*this.sensitivity;
-      // Turning and tilting both steer sideways, so either style works.
-      rx=.5+((h.yaw-c.x)*.5+h.roll*.6)*gain;ry=.5+(h.pitch-c.y)*.5*gain;
-      s.detail=`yaw ${h.yaw.toFixed(2)} · pitch ${h.pitch.toFixed(2)} · mouth ${h.mouth.toFixed(3)}`;
+      const c=this.center||h, k=this.sensitivity;
+      // Turning and tilting both steer sideways, so either style works. All
+      // angles are relative to the calibrated resting pose.
+      rx=.5+((h.yaw-c.yaw)/HEAD_SPAN.yaw+(h.roll-c.roll)/HEAD_SPAN.roll)*k;
+      ry=.5+(h.pitch-c.pitch)/HEAD_SPAN.pitch*k;
+      const deg=v=>`${Math.round(v*180/Math.PI)}°`;
+      s.detail=`turn ${deg(h.yaw-c.yaw)} · nod ${deg(h.pitch-c.pitch)} · ${pose?`jaw ${pose.jaw.toFixed(2)}`:`mouth ${face.mouth.toFixed(2)}`}`;
     }
-    s.x=clamp(this.fx.filter(clamp(rx,-.2,1.2),now));s.y=clamp(this.fy.filter(clamp(ry,-.2,1.2),now));
+    const fx=clamp(this.fx.filter(clamp(rx,-.2,1.2),now)), fy=clamp(this.fy.filter(clamp(ry,-.2,1.2),now));
+    this.history.push({t:now,x:fx,y:fy});
+    while(this.history.length>2&&now-this.history[1].t>PRESS_LOOKBACK_MS)this.history.shift();
     this.pressed=press;s.action=press;s.pressed=press&&!was;s.released=!press&&was;
+    if(s.pressed) {
+      // Aim the press where the hand was before the gesture started to move it.
+      const before=this.history[0];
+      s.x=before.x;s.y=before.y;this.holdUntil=now+PRESS_HOLD_MS;
+    } else if(now>=this.holdUntil){s.x=fx;s.y=fy;}
     return s;
   }
 }

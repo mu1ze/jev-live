@@ -34,7 +34,7 @@ export class GestureClient {
       this.stats.frames++;this.times.push(now);if(this.times.length>90)this.times.shift();this.stats.processingMs+=(data.processingMs-this.stats.processingMs)*.1;
       this.stats.latencyMs+=(now-this.inflight.sent-this.stats.latencyMs)*.1;
       this.busy=false;this.inflight=null;
-      this.onResult(data.points,data.handedness,now);
+      this.onResult(data.points,data.handedness,now,data.world||null);
     }
   }
   // Returns true when a frame was submitted.

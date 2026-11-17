@@ -79,6 +79,7 @@ class ControllerBrowserTests(unittest.TestCase):
         p.evaluate('window.stream0=document.querySelector("#video").srcObject')
         p.locator('#workflow-mode').select_option('tracking')
         self.assertTrue(p.evaluate('stream0.getTracks().every(t => t.readyState === "ended")'))
+        self.assertEqual(p.evaluate('document.querySelector("#video").style.width'), '', 'other workflows get the normal video layout back')
         self.assertFalse(p.locator('#controller-panel').is_visible())
         self.assertFalse(p.locator('#game-canvas').is_visible())
         self.assertTrue(p.locator('#key').is_visible())
@@ -94,6 +95,13 @@ class ControllerBrowserTests(unittest.TestCase):
         readout = p.locator('#controller-readout').inner_text()
         self.assertIn('PRESSED', readout)
         self.assertIn('fist', readout)
+        # The camera picture fills the stage, scaled like the aim (reach 1.25×), so
+        # the aim, the drawn landmarks and the hand in the picture line up.
+        cover = p.evaluate("""() => { const v=document.querySelector('#video').getBoundingClientRect(), s=document.querySelector('#stage').getBoundingClientRect();
+            return {left: v.left - s.left, right: v.right - s.right, top: v.top - s.top, bottom: v.bottom - s.bottom, scale: Math.max(v.width / s.width, v.height / s.height)}; }""")
+        self.assertLessEqual(cover['left'], 0.5); self.assertGreaterEqual(cover['right'], -0.5)
+        self.assertLessEqual(cover['top'], 0.5); self.assertGreaterEqual(cover['bottom'], -0.5)
+        self.assertGreaterEqual(cover['scale'], 1.24)
         # The controls legend lights up the gesture the tracker recognised.
         p.wait_for_function('() => document.querySelector("#controller-legend [data-control=fist]").hasAttribute("data-active")', timeout=10000)
         p.wait_for_function('() => document.querySelector("#game-play").textContent === "Pause"', timeout=10000)
@@ -191,7 +199,9 @@ def engine_available(name):
 
 class ControllerEngineTests(unittest.TestCase):
     """The tracker worker must load in Firefox and Safari's engine too, each
-    building both models in one worker (WebKit here falls back to CPU)."""
+    building both models in one worker, and track a real hand photo where the
+    browser has WebGL in workers. Playwright's Linux WebKit has none (Safari
+    17+ does), so there it checks loading only, on the CPU fallback."""
     def check(self, engine):
         if not engine_available(engine):
             self.skipTest(f'Install Playwright {engine} (and its system libraries) to run this check')
@@ -200,15 +210,24 @@ class ControllerEngineTests(unittest.TestCase):
             browser = getattr(pw, engine).launch(headless=True)
             page = browser.new_page()
             page.goto(f'http://127.0.0.1:{harness.port}/')
-            replies = page.evaluate("""async () => {
+            replies = page.evaluate("""async photo => {
                 const w = new Worker('gesture-worker.mjs', {type: 'module'});
-                const ask = message => new Promise(resolve => { w.onmessage = e => resolve(e.data.type); w.onerror = () => resolve('worker error'); setTimeout(() => resolve('timeout'), 60000); w.postMessage(message); });
-                const replies = [await ask({type: 'load', mode: 'hand'}), await ask({type: 'load', mode: 'face'})];
+                const ask = (message, transfer) => new Promise(resolve => { w.onmessage = e => resolve(e.data); w.onerror = () => resolve({type: 'worker error'}); setTimeout(() => resolve({type: 'timeout'}), 60000); w.postMessage(message, transfer || []); });
+                const replies = [(await ask({type: 'load', mode: 'hand'})).type, (await ask({type: 'load', mode: 'face'})).type];
+                const bytes = Uint8Array.from(atob(photo), c => c.charCodeAt(0));
+                const bitmap = await createImageBitmap(new Blob([bytes], {type: 'image/jpeg'}));
+                const result = await ask({type: 'frame', id: 1, mode: 'hand', bitmap, timestamp: 1}, [bitmap]);
+                // MediaPipe needs WebGL inside the worker to read frames, even on CPU.
+                replies.push(result.points && result.world ? 'hand found' : /GLctx/.test(result.message || '') ? 'no worker WebGL' : 'no hand: ' + result.type + ' ' + (result.message || ''));
                 w.terminate();
                 return replies;
-            }""")
+            }""", HAND)
             browser.close()
-        self.assertEqual(replies, ['ready', 'ready'])
+        self.assertEqual(replies[:2], ['ready', 'ready'])
+        if replies[2] == 'no worker WebGL':
+            self.assertEqual(engine, 'webkit', 'only Linux WebKit lacks WebGL in workers (Safari 17+ has it)')
+        else:
+            self.assertEqual(replies[2], 'hand found')
 
     def test_trackers_load_in_firefox(self):
         self.check('firefox')

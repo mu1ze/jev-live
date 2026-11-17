@@ -7,6 +7,7 @@ const $=id=>document.getElementById(id);
 const BEST_KEY='jev-live.controller.v1';
 const SOUNDS={score:[880,60,1],bonus:[1175,70,2],hurt:[196,180,1],over:[147,260,2]};
 const STALE_MS=700; // no tracker answer for this long counts as "player not seen"
+const VFC_QUIET_MS=150; // no new-frame callback for this long → feed frames from the draw loop
 const EMOJI='"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
 const TIPS={
   hand:'Keep your whole hand in view, about an arm’s length from the camera.',
@@ -30,7 +31,7 @@ export class ControllerView {
     this.tracker={state:'idle',message:''};
     this.pointer={x:.5,y:.5,down:false,pressed:false,keys:new Set()};
     this.session=new Session('catch');this.best=loadBest();this.audio=new ActionAudio();
-    this.client=new GestureClient((points,handedness,now)=>this.result(points,now),(state,message)=>{this.tracker={state,message};this.panel(performance.now(),true);});
+    this.client=new GestureClient((points,handedness,now,world)=>this.result(points,now,world),(state,message)=>{this.tracker={state,message};this.panel(performance.now(),true);});
     this.legend=$('controller-legend');this.activeId=null;this.using='';
     this.wire();this.selectGame('catch');this.setMode(this.mode);
   }
@@ -79,13 +80,17 @@ export class ControllerView {
     } else {
       delete this.stage.dataset.controller;delete this.stage.dataset.controllerCamera;
       cancelAnimationFrame(this.raf);this.raf=0;this.detach();this.session.pause('paused');
+      for(const key of ['left','top','width','height','objectFit','inset'])this.video.style[key]='';
+      this.videoLayout='';
     }
   }
   attach() {
-    this.camera=true;
+    this.camera=true;this.watchFrames();
     if(this.mode!=='pointer')this.client.start(this.mode);
   }
   detach() {
+    if(this.frameWatch&&this.video.cancelVideoFrameCallback)this.video.cancelVideoFrameCallback(this.frameWatch);
+    this.frameWatch=0;this.framePending=false;
     this.camera=false;this.client.close();this.tracker={state:'idle',message:''};
     this.input.setMode(this.mode);this.pressLatch=false;
     if(this.mode!=='pointer')this.session.pause('lost');
@@ -135,10 +140,27 @@ export class ControllerView {
   }
 
   // ---- Input ----
-  result(points,now) {
-    const state=this.input.update(points,now);
+  result(points,now,world=null) {
+    const state=this.input.update(points,now,world);
     this.lastResult=now;
     if(state.pressed)this.pressLatch=true; // consumed by exactly one game frame
+    // A camera frame arrived while the tracker was busy: send it right away.
+    if(this.framePending)this.sendFrame();
+  }
+  // Each new camera frame goes to the tracker as soon as it is shown, once.
+  // The draw loop runs at screen rate (often 60 Hz) and would send the same
+  // 30 Hz camera frame twice, making a fresh frame wait behind a duplicate.
+  watchFrames() {
+    const video=this.video;
+    if(this.frameWatch||!video.requestVideoFrameCallback)return;
+    const tick=()=>{this.frameWatch=video.requestVideoFrameCallback(tick);this.lastFrameCallback=performance.now();this.sendFrame();};
+    this.frameWatch=video.requestVideoFrameCallback(tick);
+  }
+  sendFrame() {
+    this.framePending=false;
+    if(!this.camera||this.mode==='pointer'||document.hidden||this.video.readyState<2||!this.client.ready)return;
+    if(this.client.busy){this.framePending=true;return;}
+    this.client.push(this.video,performance.now());
   }
   current(now,dt) {
     if(this.mode==='pointer') {
@@ -160,7 +182,8 @@ export class ControllerView {
     if(!this.active)return;
     this.raf=requestAnimationFrame(t=>this.frame(t));
     const dt=Math.max(0,(now-this.last)/1000);this.last=now;
-    if(this.camera&&this.mode!=='pointer'&&this.video.readyState>=2&&!document.hidden)this.client.push(this.video,now);
+    // Fallback where new-frame callbacks are missing or paused (e.g. a hidden video).
+    if(!(now-(this.lastFrameCallback||-Infinity)<VFC_QUIET_MS))this.sendFrame();
     this.resize();
     const input=this.current(now,dt), before=this.session.state;
     const events=this.session.update(dt,input);
@@ -189,6 +212,31 @@ export class ControllerView {
     if(this.canvas.width!==w||this.canvas.height!==h){this.canvas.width=w;this.canvas.height=h;}
     this.width=rect.width;this.height=rect.height;this.ratio=ratio;
     this.session.resize(rect.width/Math.max(1,rect.height));
+    // The camera fills the stage (cover), so the screen and the hand share one space.
+    const vw=this.video.videoWidth, vh=this.video.videoHeight;
+    if(vw&&vh&&rect.width&&rect.height) {
+      const k=Math.max(rect.width/vw,rect.height/vh);
+      this.input.setView(vw*k/rect.width,vh*k/rect.height);
+    }
+    this.layoutVideo();
+  }
+  // Camera point (mirrored, 0…1) → stage pixels. In hand mode this is exactly
+  // the aim's mapping (reach, sensitivity and recenter included), so the aim,
+  // the drawn landmarks and the camera picture all line up.
+  toScreen(q) {
+    if(this.mode==='hand'){const m=this.input.handMap(q);return [m.x*this.width,m.y*this.height];}
+    const v=this.input.view;
+    return [(.5+(q.x-.5)*v.x)*this.width,(.5+(q.y-.5)*v.y)*this.height];
+  }
+  // Place the (CSS-mirrored) video element with the same mapping. Only
+  // rewritten when it changes: on resize, recenter or a sensitivity change.
+  layoutVideo() {
+    if(!this.video.videoWidth)return;
+    const [left,top]=this.toScreen({x:0,y:0}), [right,bottom]=this.toScreen({x:1,y:1});
+    const layout=[left,top,right-left,bottom-top].map(v=>v.toFixed(1)).join();
+    if(layout===this.videoLayout)return;
+    this.videoLayout=layout;
+    Object.assign(this.video.style,{inset:'auto',left:`${left}px`,top:`${top}px`,width:`${right-left}px`,height:`${bottom-top}px`,objectFit:'fill'});
   }
 
   // ---- Drawing ----
@@ -204,12 +252,8 @@ export class ControllerView {
     // One-axis games show position with their own piece; pointing games need a cursor.
     if(s.Game.axes==='xy'&&(input.present||this.mode==='pointer'))this.drawCursor(ctx,input,w,h);
   }
-  videoRect() {
-    const vw=this.video.videoWidth||16, vh=this.video.videoHeight||9, k=Math.min(this.width/vw,this.height/vh);
-    return {x:(this.width-vw*k)/2,y:(this.height-vh*k)/2,w:vw*k,h:vh*k};
-  }
   drawLandmarks(ctx) {
-    const r=this.videoRect(), p=this.input.state.raw, at=q=>[r.x+q.x*r.w,r.y+q.y*r.h];
+    const p=this.input.state.raw, at=q=>this.toScreen(q);
     ctx.strokeStyle='#c5ed9666';ctx.fillStyle='#c5ed96aa';ctx.lineWidth=2;
     if(this.mode==='hand') {
       ctx.beginPath();for(const [a,b] of HAND_LINKS){ctx.moveTo(...at(p[a]));ctx.lineTo(...at(p[b]));}ctx.stroke();
@@ -299,7 +343,7 @@ export class ControllerView {
     let state;
     if(this.mode==='pointer')state='Touch, mouse or keys · camera not needed';
     else if(!this.camera)state='Camera off · Start camera to use gestures';
-    else if(this.tracker.state==='ready')state=`${this.tracker.message} · ${this.client.rate(now).toFixed(0)} fps · ${this.client.stats.processingMs.toFixed(0)} ms`;
+    else if(this.tracker.state==='ready')state=`${this.tracker.message} · ${this.client.rate(now).toFixed(0)} fps · ${this.client.stats.latencyMs.toFixed(0)} ms delay`;
     else state=this.tracker.message||'Waiting for camera…';
     text('controller-state',state);
     const g=this.input.state;

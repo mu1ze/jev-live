@@ -21,7 +21,10 @@ async function create(mode,delegate) {
   self.ModuleFactory=ModuleFactory;
   const options={baseOptions:{modelAssetPath:`gesturevendor/${mode==='hand'?'hand':'face'}_landmarker.task`,delegate},runningMode:'VIDEO'};
   if(mode==='hand')return HandLandmarker.createFromOptions(fileset,{...options,numHands:1,minHandDetectionConfidence:.5,minHandPresenceConfidence:.5,minTrackingConfidence:.5});
-  return FaceLandmarker.createFromOptions(fileset,{...options,numFaces:1,outputFaceBlendshapes:false,outputFacialTransformationMatrixes:false});
+  // The transformation matrix is the head's 3D rotation, fitted mostly to the
+  // rigid parts of the face; blendshapes give a jaw-open score. Together they
+  // keep opening the mouth from moving the aim.
+  return FaceLandmarker.createFromOptions(fileset,{...options,numFaces:1,outputFaceBlendshapes:true,outputFacialTransformationMatrixes:true});
 }
 function load(mode,only) {
   // GPU is much faster where WebGL2 is available in workers; CPU always works.
@@ -53,17 +56,26 @@ onmessage=async({data:m})=>{
       if(!model){m.bitmap.close();postMessage({type:'result',id:m.id,mode:m.mode,points:null,processingMs:0});return;}
       // VIDEO mode requires strictly increasing timestamps.
       const timestamp=Math.max(lastTimestamp+1,Math.round(m.timestamp));lastTimestamp=timestamp;
-      let points=null, handedness='';
+      let points=null, world=null, handedness='';
       try {
         if(m.mode==='hand') {
           const result=model.detectForVideo(m.bitmap,timestamp);
-          if(result.landmarks?.[0]?.length===21){points=pack(result.landmarks[0]);handedness=result.handedness?.[0]?.[0]?.categoryName||'';}
+          if(result.landmarks?.[0]?.length===21) {
+            points=pack(result.landmarks[0]);handedness=result.handedness?.[0]?.[0]?.categoryName||'';
+            // Metric 3D points: hand shape (pinch, fist) independent of tilt and frame aspect.
+            if(result.worldLandmarks?.[0]?.length===21)world=pack(result.worldLandmarks[0]);
+          }
         } else {
           const result=model.detectForVideo(m.bitmap,timestamp);
-          if(result.faceLandmarks?.[0]?.length>=468)points=pack(result.faceLandmarks[0],FACE_POINTS);
+          if(result.faceLandmarks?.[0]?.length>=468) {
+            points=pack(result.faceLandmarks[0],FACE_POINTS);
+            // pose = 16 matrix values (column-major) + jawOpen, or absent.
+            const matrix=result.facialTransformationMatrixes?.[0]?.data, jaw=result.faceBlendshapes?.[0]?.categories?.find(c=>c.categoryName==='jawOpen');
+            if(matrix?.length===16&&jaw){world=new Float32Array(17);world.set(matrix);world[16]=jaw.score;}
+          }
         }
       } finally {m.bitmap.close();}
-      postMessage({type:'result',id:m.id,mode:m.mode,points,handedness,processingMs:performance.now()-started},points?[points.buffer]:[]);
+      postMessage({type:'result',id:m.id,mode:m.mode,points,world,handedness,processingMs:performance.now()-started},[points?.buffer,world?.buffer].filter(Boolean));
     }
   } catch(error) {
     m.bitmap?.close?.();
