@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {points, readHand, readHead, readHeadPose, GestureInput, OneEuro, FACE, PINCH_ON, PINCH_OFF, JAW_ON, HEAD_SPAN, HAND_REACH, controls, activeControl} from '../static/gestures.mjs';
+import {points, readHand, readHead, readHeadPose, GestureInput, OneEuro, FACE, PINCH_ON, PINCH_OFF, JAW_ON, HEAD_SPAN, HAND_REACH, FINGER_DROP, controls, activeControl} from '../static/gestures.mjs';
 import {Session, StarCatch, CaveGlide, BubblePop, GAMES, rng} from '../static/mini-games.mjs';
 
 // Real MediaPipe output for tests/fixtures/hand-thumb-up.jpg (image coordinates).
@@ -328,4 +328,61 @@ test('head: a small nod moves the aim most of the way up or down',()=>{
   for(let t=70;t<100;t++)s=g.update(face(),t*33,pose({yaw:rad(12),pitch:rad(5)}));
   assert.ok(s.x>.75&&Math.abs(s.y-.5)<.05,`12° turn right → ${s.x},${s.y}`);
   assert.ok(Math.abs(rad(8)/HEAD_SPAN.pitch-.333)<.01,'8° nod = a third of the screen');
+});
+
+// ---- Bubble Pop: aim with the index finger, no head steering.
+function lerpHand(a,b,k) {return Float32Array.from(a,(v,i)=>v+(b[i]-v)*k);}
+// An open hand whose index finger curls down to meet the thumb (a real pinch:
+// the index tip travels most of the way).
+function pinchingHand(k,{cx=.5,cy=.5}={}) {
+  const open=hand({cx,cy}), closed=Float32Array.from(open), set=(i,x,y)=>{closed[i*3]=x;closed[i*3+1]=y;};
+  set(8,cx-.11,cy+.02);set(7,cx-.08,cy-.04);set(4,cx-.115,cy+.025);
+  return lerpHand(open,closed,k);
+}
+
+test('bubble pop is for hand and touch only, and aims with the index finger',()=>{
+  assert.deepEqual(BubblePop.inputs,['hand','pointer']);
+  assert.equal(BubblePop.aim,'finger');
+  for(const G of GAMES)if(G!==BubblePop)assert.ok(!G.inputs&&!G.aim,`${G.title} keeps every input and the palm aim`);
+  const card=controls('hand','xy','Pop · start','finger')[0];
+  assert.equal(card.gesture,'Index finger');assert.match(card.does,/below the tip/);
+  assert.equal(controls('hand','xy')[0].gesture,'Open hand');
+});
+
+test('finger aim sits just below the index tip, as drawn',()=>{
+  const g=new GestureInput('hand');g.setAim('finger');g.setView(1.2,1);
+  let s;for(let t=0;t<30;t++)s=g.update(hand({cx:.4,cy:.5}),t*33);
+  const p=g.state.raw, at=g.handMap({x:p[8].x+(p[7].x-p[8].x)*FINGER_DROP,y:p[8].y+(p[7].y-p[8].y)*FINGER_DROP});
+  assert.ok(Math.abs(s.x-at.x)<.005&&Math.abs(s.y-at.y)<.005,`aim ${s.x},${s.y} vs finger ${at.x},${at.y}`);
+  assert.ok(g.handMap(p[8]).y<s.y&&s.y<g.handMap(p[7]).y,'between the tip and the last knuckle');
+});
+
+test('finger aim reaches the top of the screen with the whole hand still in view',()=>{
+  const high=hand({cx:.5,cy:.25}), lowest=Math.min(...[...high].filter((_,i)=>i%3===1));
+  assert.ok(lowest>=.09,'every landmark is inside the camera picture');
+  const finger=new GestureInput('hand');finger.setAim('finger');
+  const palm=new GestureInput('hand');
+  let f,q;for(let t=0;t<30;t++){f=finger.update(high,t*33);q=palm.update(high,t*33);}
+  assert.ok(f.y<.04,`finger aim at y ${f.y.toFixed(3)}`);
+  assert.ok(q.y>.2,`the palm would only reach y ${q.y.toFixed(3)}`);
+});
+
+test('a slow pinch with the finger aim pops where the finger pointed before it curled',()=>{
+  const g=new GestureInput('hand');g.setAim('finger');
+  let s,t=0;for(;t<20;t++)s=g.update(pinchingHand(0),t*33);
+  const before={x:s.x,y:s.y}, trail=[];
+  for(let k=1;k<=8;k++,t++){s=g.update(pinchingHand(k/8),t*33);trail.push({x:s.x,y:s.y});if(s.pressed)break;}
+  const off=q=>Math.hypot(q.x-before.x,q.y-before.y);
+  assert.equal(s.pressed,true,'the pinch registers');
+  assert.ok(trail.length>=4,'the finger moved for several frames before the press');
+  assert.ok(off(trail.at(-4))>.015,`aiming 90 ms back would miss by ${off(trail.at(-4)).toFixed(3)}`);
+  assert.ok(off(s)<.005,`popped at ${s.x.toFixed(3)},${s.y.toFixed(3)}, finger pointed at ${before.x.toFixed(3)},${before.y.toFixed(3)}`);
+});
+
+test('changing the aim point clears a recenter made for the other one',()=>{
+  const g=new GestureInput('hand');g.recenter();g.update(hand({cx:.3,cy:.4}),0);
+  assert.ok(g.center);
+  g.setAim('finger');assert.equal(g.center,null);
+  g.setAim('finger');g.recenter();g.update(hand({cx:.3,cy:.4}),100);
+  const c=g.center;g.setAim('finger');assert.equal(g.center,c,'same aim keeps it');
 });

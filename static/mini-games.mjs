@@ -134,7 +134,9 @@ export class CaveGlide extends Game {
 export class BubblePop extends Game {
   static id='pop';static title='Bubble Pop';
   static help='Point at a bubble and press to pop it. Gold is +3, spiky is −2. 45 seconds.';
-  static axes='xy';static duration=45;
+  // Popping needs precise aim anywhere on screen, which head steering can't
+  // give; the hand aims with the index finger so the top stays reachable.
+  static axes='xy';static duration=45;static inputs=['hand','pointer'];static aim='finger';
   reset() {super.reset();this.lives=0;this.left=BubblePop.duration;this.spawnIn=.2;this.cursor={x:.5*this.aspect,y:.5};}
   update(dt,input) {
     this.tick(dt);this.left=Math.max(0,this.left-dt);

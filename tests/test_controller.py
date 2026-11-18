@@ -128,6 +128,27 @@ class ControllerBrowserTests(unittest.TestCase):
         self.assertEqual(legend.count(), 2)
         self.assertIn('Space', legend.nth(1).inner_text())
 
+    def test_bubble_pop_is_hand_or_touch_and_aims_with_the_finger(self):
+        p = self.page
+        select = p.locator('#controller-input')
+        select.select_option('head')
+        p.locator('[data-game="pop"]').click()
+        # A head player is moved to their hand, and Head can't be picked here.
+        self.assertEqual(select.input_value(), 'hand')
+        self.assertTrue(p.locator('#controller-input option[value="head"]').is_disabled())
+        self.assertIn('not for Bubble Pop', p.locator('#controller-input option[value="head"]').inner_text())
+        self.assertIn('switched to hand', p.locator('#game-announce').inner_text())
+        self.assertIn('Index finger', p.locator('#controller-legend li').nth(0).inner_text())
+        self.assertIn('index finger', p.locator('#controller-input-help').inner_text())
+        self.assertFalse(p.locator('#controller-input option[value="pointer"]').is_disabled())
+        # Other games take every input again, with the palm aim.
+        p.locator('[data-game="catch"]').click()
+        self.assertFalse(p.locator('#controller-input option[value="head"]').is_disabled())
+        self.assertEqual(p.locator('#controller-input option[value="head"]').inner_text(), 'Head')
+        self.assertIn('Open hand', p.locator('#controller-legend li').nth(0).inner_text())
+        select.select_option('head')
+        self.assertEqual(select.input_value(), 'head')
+
     def test_worker_builds_a_second_model_and_the_cpu_fallback(self):
         # MediaPipe clears self.ModuleFactory after each build; the worker must
         # restore it or switching hand→head and the GPU→CPU fallback both fail.

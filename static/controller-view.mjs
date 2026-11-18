@@ -13,7 +13,9 @@ const TIPS={
   hand:'Keep your whole hand in view, about an arm’s length from the camera.',
   head:'Sit facing the camera. Press Recenter if steering drifts.',
   pointer:'Click or tap the game first so it receives your keys.',
+  finger:'Point with your index finger: the aim sits just below its tip, so you can reach the top of the screen with your hand still in view.',
 };
+const ALL_INPUTS=['hand','head','pointer'];
 
 function loadBest() {
   try {const saved=JSON.parse(localStorage.getItem(BEST_KEY)||'{}');return saved?.version===1&&saved.best&&typeof saved.best==='object'?saved.best:{};}
@@ -96,9 +98,11 @@ export class ControllerView {
     if(this.mode!=='pointer')this.session.pause('lost');
   }
   setMode(mode) {
+    if(!this.allows(mode))mode='hand';
+    $('controller-input').value=mode;
     this.mode=mode;this.input.setMode(mode);this.input.sensitivity=Number($('controller-sensitivity').value);this.pressLatch=false;
     this.canvas.dataset.input=mode;$('controller-recenter').disabled=mode==='pointer';
-    $('controller-input-help').textContent=TIPS[mode];
+    $('controller-input-help').textContent=mode==='hand'&&this.session.Game.aim==='finger'?TIPS.finger:TIPS[mode];
     if(mode==='pointer'){this.client.close();this.tracker={state:'idle',message:''};}
     else if(this.camera)this.client.start(mode);
     this.session.select(this.session.Game.id);
@@ -107,13 +111,30 @@ export class ControllerView {
   }
   selectGame(id) {
     this.session.select(id);
-    document.querySelectorAll('[data-game]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.game===this.session.Game.id)));
-    $('game-help').textContent=this.session.Game.help;
+    const Game=this.session.Game;
+    document.querySelectorAll('[data-game]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.game===Game.id)));
+    $('game-help').textContent=Game.help;
+    this.input.setAim(Game.aim);
+    // Some games can't be played with every input: those options are disabled
+    // (and say why), and a player on one is moved to their hand.
+    for(const option of $('controller-input').options) {
+      option.disabled=!this.allows(option.value);
+      option.textContent=option.dataset.label??=option.textContent;
+      if(option.disabled)option.textContent+=` (not for ${Game.title})`;
+    }
+    if(!this.allows(this.mode)) {
+      const from=INPUTS[this.mode].name;
+      this.setMode('hand');
+      this.announce(`${Game.title} can't be played with your ${from.toLowerCase()} · switched to hand`);
+      return;
+    }
+    $('controller-input-help').textContent=this.mode==='hand'&&Game.aim==='finger'?TIPS.finger:TIPS[this.mode];
     this.renderLegend();
     this.panel(performance.now(),true);
   }
+  allows(mode) {return (this.session.Game.inputs||ALL_INPUTS).includes(mode);}
   // The controls for this input and game, as a list the panel and canvas share.
-  controls() {return controls(this.mode,this.session.Game.axes,this.session.Game.id==='pop'?'Pop · start':'Start · resume');}
+  controls() {const G=this.session.Game;return controls(this.mode,G.axes,G.id==='pop'?'Pop · start':'Start · resume',G.aim);}
   renderLegend() {
     if(!this.legend)return;
     this.legend.replaceChildren(...this.controls().map(c=>{

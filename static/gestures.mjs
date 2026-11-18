@@ -23,7 +23,8 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
 const dist3=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y,(a.z||0)-(b.z||0));
 const clamp=(v,lo=0,hi=1)=>Math.min(hi,Math.max(lo,v));
 
-// Hand pose from 21 landmarks: palm centre, pinch ratio and finger extension.
+// Hand pose from 21 landmarks: palm centre, index finger point, pinch ratio
+// and finger extension.
 // `world` (MediaPipe's metric 3D points) gives the hand's true shape, so a
 // pinch or fist reads the same whether the hand is tilted, turned or near the
 // frame edge; without it the image points are used.
@@ -35,8 +36,13 @@ export function readHand(p,world=null) {
   const pinch=d(shape[4],shape[8])/size;
   // Palm centre is steady while the fingers pinch or curl.
   const palm={x:(p[0].x+p[5].x+p[9].x+p[17].x)/4,y:(p[0].y+p[5].y+p[9].y+p[17].y)/4};
+  // Just below the index fingertip (part way to the last knuckle).
+  const finger={x:p[8].x+(p[7].x-p[8].x)*FINGER_DROP,y:p[8].y+(p[7].y-p[8].y)*FINGER_DROP};
   const pose=count===0?'fist':count>=4?'open':extended[0]&&count===1?'point':extended[0]&&extended[1]&&count===2?'peace':'other';
-  return {palm,pinch,pose,size};
+  // How open the index finger is (thumb gap + reach from the wrist): it falls
+  // as the hand pinches or closes, so a press can find where closing began.
+  const spread=pinch+d(shape[8],shape[0])/size;
+  return {palm,finger,pinch,pose,size,spread};
 }
 
 // Head pose from the face subset (fallback when the 3D pose is missing).
@@ -96,13 +102,26 @@ export const HEAD_SPAN={yaw:.7,roll:.8,pitch:.42};
 // HAND_REACH: the aim sits on the hand as drawn on screen; a little extra reach
 // means the screen edge is reached before the hand leaves the camera.
 export const HAND_REACH=1.25;
+// Finger aim sits this far from the index tip toward its last knuckle.
+export const FINGER_DROP=.4;
 const LOST_MS=400;
-// A pinch or fist moves the hand's landmarks, so a press is aimed where the
-// hand was just before it began, and the aim holds still briefly after.
-const PRESS_LOOKBACK_MS=90, PRESS_HOLD_MS=140;
+// A pinch or fist moves the hand's landmarks (the index finger most of all),
+// so a press is aimed where the hand was before the gesture began: back past
+// every frame where the finger was closing (up to PRESS_SEARCH_MS), and at
+// least PRESS_LOOKBACK_MS back. The aim then holds still briefly.
+const PRESS_LOOKBACK_MS=90, PRESS_SEARCH_MS=400, PRESS_HOLD_MS=140, CLOSING_STEP=.015;
 
 export class GestureInput {
-  constructor(mode='hand') {this.sensitivity=1;this.view={x:1,y:1};this.setMode(mode);}
+  constructor(mode='hand') {this.sensitivity=1;this.view={x:1,y:1};this.aim='palm';this.setMode(mode);}
+  // What the hand aims with: 'palm' (steady, for steering games) or 'finger'
+  // (just below the index tip, for pointing games). A recenter belongs to one
+  // aim point, so changing it clears that.
+  setAim(aim) {
+    aim=aim==='finger'?'finger':'palm';
+    if(aim===this.aim)return;
+    this.aim=aim;this.fx=new OneEuro();this.fy=new OneEuro();this.history=[];
+    if(this.mode==='hand')this.center=null;
+  }
   // How the camera frame is scaled onto the screen (see handMap), so the aim
   // lands on the hand as drawn. 1,1 = the frame exactly fills the screen.
   setView(x,y) {this.view={x:x||1,y:y||1};}
@@ -131,19 +150,21 @@ export class GestureInput {
       return s;
     }
     const p=points(flat);this.lastSeen=now;s.present=true;s.raw=p;
-    let rx,ry,press;
+    let rx,ry,press,open;
     if(this.mode==='hand') {
       const h=readHand(p,world&&world.length>=63?points(world):null);
       const threshold=this.pressed?PINCH_OFF:PINCH_ON;
       press=h.pinch<threshold||h.pose==='fist';
       s.pose=press?(h.pose==='fist'?'fist':'pinch'):h.pose;
-      if(this.calibrating){this.center={x:h.palm.x,y:h.palm.y};this.calibrating=null;}
-      ({x:rx,y:ry}=this.handMap(h.palm));
+      const at=this.aim==='finger'?h.finger:h.palm;
+      open=h.spread;
+      if(this.calibrating){this.center={x:at.x,y:at.y};this.calibrating=null;}
+      ({x:rx,y:ry}=this.handMap(at));
       s.detail=`pinch ${h.pinch.toFixed(2)} · ${h.pose}`;
     } else {
       const face=readHead(p), pose=world&&world.length>=17?readHeadPose(world):null;
       const h={yaw:pose?pose.yaw:face.yaw,pitch:pose?pose.pitch:face.pitch,roll:face.roll};
-      press=pose?pose.jaw>(this.pressed?JAW_OFF:JAW_ON):face.mouth>(this.pressed?MOUTH_OFF:MOUTH_ON);
+      press=pose?pose.jaw>(this.pressed?JAW_OFF:JAW_ON):face.mouth>(this.pressed?MOUTH_OFF:MOUTH_ON);open=null;
       s.pose=press?'mouth open':Math.abs(h.roll)>.3?(h.roll>0?'tilt right':'tilt left'):'';
       // The first few frames define "straight ahead" for this player.
       if(this.calibrating) {
@@ -159,12 +180,15 @@ export class GestureInput {
       s.detail=`turn ${deg(h.yaw-c.yaw)} · nod ${deg(h.pitch-c.pitch)} · ${pose?`jaw ${pose.jaw.toFixed(2)}`:`mouth ${face.mouth.toFixed(2)}`}`;
     }
     const fx=clamp(this.fx.filter(clamp(rx,-.2,1.2),now)), fy=clamp(this.fy.filter(clamp(ry,-.2,1.2),now));
-    this.history.push({t:now,x:fx,y:fy});
-    while(this.history.length>2&&now-this.history[1].t>PRESS_LOOKBACK_MS)this.history.shift();
+    this.history.push({t:now,x:fx,y:fy,open});
+    while(this.history.length>2&&now-this.history[1].t>PRESS_SEARCH_MS)this.history.shift();
     this.pressed=press;s.action=press;s.pressed=press&&!was;s.released=!press&&was;
     if(s.pressed) {
       // Aim the press where the hand was before the gesture started to move it.
-      const before=this.history[0];
+      const h=this.history;let i=h.length-1,j=i;
+      while(i>0&&h[i].open!=null&&h[i-1].open!=null&&h[i-1].open>h[i].open+CLOSING_STEP)i--;
+      while(j>0&&now-h[j].t<PRESS_LOOKBACK_MS)j--;
+      const before=h[Math.min(i,j)];
       s.x=before.x;s.y=before.y;this.holdUntil=now+PRESS_HOLD_MS;
     } else if(now>=this.holdUntil){s.x=fx;s.y=fy;}
     return s;
@@ -174,10 +198,10 @@ export class GestureInput {
 // What each control does, for the on-screen guide. `axes` is the game's axes
 // ('x', 'y' or 'xy') so steering is described the way this game uses it.
 const STEER={x:'Move left / right',y:'Move up / down',xy:'Aim'};
-export function controls(mode,axes='xy',pressUse='Start · resume') {
+export function controls(mode,axes='xy',pressUse='Start · resume',aim='palm') {
   const steer=STEER[axes]||STEER.xy;
   if(mode==='hand')return [
-    {id:'steer',icon:'✋',gesture:'Open hand',does:steer},
+    aim==='finger'?{id:'steer',icon:'☝️',gesture:'Index finger',does:`${steer} · just below the tip`}:{id:'steer',icon:'✋',gesture:'Open hand',does:steer},
     {id:'pinch',icon:'🤏',gesture:'Pinch',does:pressUse},
     {id:'fist',icon:'✊',gesture:'Fist',does:pressUse},
   ];
