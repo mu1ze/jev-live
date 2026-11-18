@@ -1,6 +1,6 @@
 /* Dedicated CLASSIC worker. Its HTTP response owns the restrictive CSP. */
 importScripts('tracker-classic.js', 'trackingvendor/opencv.js');
-let tracker=null;
+let tracker=null, activeSeed=null;
 cv.onRuntimeInitialized=()=>postMessage({type:'ready',version:'4.13.0'});
 onmessage=async ({data:m})=>{
   try {
@@ -8,13 +8,26 @@ onmessage=async ({data:m})=>{
       let fetchBlocked=false;try{await fetch('api/config');}catch{fetchBlocked=true;}
       postMessage({type:'proof',fetchBlocked});return;
     }
-    if(m.type==='reset') {tracker?.dispose();tracker=null;return;}
+    if(m.type==='reset') {activeSeed=null;tracker?.dispose();tracker=null;return;}
     const started=performance.now();let seedResult;
     if(m.type==='frame') {
-      if(!tracker||tracker.width!==m.width||tracker.height!==m.height){tracker?.dispose();tracker=new PixelTracker(cv,m.width,m.height);}
+      if(!tracker||tracker.width!==m.width||tracker.height!==m.height){activeSeed=null;tracker?.dispose();tracker=new PixelTracker(cv,m.width,m.height);}
       tracker.push(new ImageData(new Uint8ClampedArray(m.pixels),m.width,m.height),m.frameId,m.timestamp);
     } else if(m.type==='seed') {
-      const result=tracker?.seed(m.frameId,m.detections);
+      if(activeSeed)return; // client keeps at most one replay outstanding
+      const owner=tracker,token=activeSeed={};
+      let result;
+      try {
+        if(owner) {
+          const steps=owner.seedSteps(m.frameId,m.detections);
+          while(true) {
+            if(activeSeed!==token||tracker!==owner){steps.return();return;}
+            const step=steps.next();
+            if(step.done){result=step.value;break;}
+            await new Promise(resolve=>setTimeout(resolve,0));
+          }
+        }
+      } finally {if(activeSeed===token)activeSeed=null;}
       // Only reason codes/counts leave diagnostics; no labels or pixel/box payloads.
       if(result)seedResult={accepted:result.accepted,rejected:result.rejected.map(({reason})=>({reason})),replayMs:result.replayMs};
     }

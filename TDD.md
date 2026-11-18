@@ -1,5 +1,231 @@
 # Observed test-first checkpoints
 
+## Exclusive workflow modes — starting at `6ed2427`
+
+One existing app and URL, with top-level `#workflow-mode`: `tracking` (default,
+Detection / Tracking) and `actions` (recognition only). No routes, server/auth,
+CSP, engine timing contracts, 350ms geometry TTL or 4s semantic TTL changed.
+
+Observed vertical RED → GREEN milestones, each followed by the complete Python
+ResourceWarning-as-error and Node suites before its implementation commit:
+
+| Slice | Observed RED | GREEN / commit |
+| --- | --- | --- |
+| Workflow UI + effect gate | Browser could not find `#workflow-mode` (expected missing-feature timeout). | Default tracking, hidden action editor, visible diagnostics; retained opt-in cannot execute effects. `241b6bb`; Python 62 / Node 28. |
+| Recognition-only Actions | Cold Actions rendered one box (`1 != 0`); worker/sampler work was still present. | No worker/runtime requests, getImageData, RVFC sampling, 20ms sampler, tracker current/seed/diagnostics calls; four positives activate with direct-video capture timestamps. `c3b475d`; Python 63 / Node 28. |
+| Running transitions | Leaving tracking left one active worker (`1 != 0`). | Same camera, terminated worker, canceled callback/timer, invalidated replies, one outstanding request; one fresh worker and actual measured textured-object tracks on return. `b88700b`; Python 64 / Node 28. |
+| Camera startup races | Permission switch stranded disabled Start; a switch during play lost disconnect cleanup and source label; late play rejection stranded the retained stream. Cold Actions also still claimed it could track visually. | Pending permission canceled with late tracks stopped; retained stream identity protects play/disconnect/failure cleanup; workflow-appropriate empty results. `87d4da9`; Python 68 / Node 28. |
+
+The existing action browser suite now explicitly selects Actions after every
+reload. Both Toggle and While present retain the slow 1400ms positives,
+three-negative absence/return cycles, stable identifiers, expiry/gap limits,
+opt-in/audio generations, safe text cards and full hidden/target/confidence/
+disable/Stop/source/edit/reset matrix. Workflow round trips were added to that
+matrix. Both complete action cycles now also measure **zero** worker creation,
+getImageData, frame callbacks and sampler timers, with no runtime fetch or box.
+Actions still uploads recognize and show semantic results without live geometry.
+Mobile 390px overflow and tracking-control/editor visibility remain checked.
+
+Final commands (local fixtures only, no provider/deployment/credentials):
+
+```sh
+INSTABOX_HEADLESS=1 /data/workspace/jev-live/.venv-test/bin/python -W error::ResourceWarning -m unittest discover -s tests -q
+# 68 passed, no skips; 297.789s on completed application code
+node --test tests/*.test.mjs
+# 28 passed, no skips
+python3 artifacts/guard_slow_recognition.py
+# 16 tracked payload files from its existing baseline; no findings;
+# source/generated manifests verified; credentialReads=0
+# Live-secret guard intentionally left to parent: guard_tracking.py reads credentials.
+git diff --check
+# clean
+```
+
+Tests and docs were strengthened afterward without production changes, including
+full-cycle overhead assertions (both modes passed again). The final verification
+is rerun before the documentation/test-only commit. Private HTTPS acceptance,
+real-secret comparison and any deployment remain the parent's gate. No skills
+were edited, no new dependency/network/provider call was introduced, and nothing
+was pushed or deployed.
+
+## Toggle / While present and preview identifiers — superseding expiry contract
+
+Starting revision `afa9420`, branch `feat/visual-actions`. This change explicitly
+supersedes the older sections below that require automatic 2500ms effect expiry.
+2500ms remains an **incoming capture freshness / successive-observation gap**
+boundary, not a render-clock OFF timer. Missing rule mode migrates to Toggle,
+matching new editor/preset defaults; there is no legacy-expiry fallback.
+
+Observed RED → GREEN checkpoints:
+
+- Added `toggle latches across time ...`: the old engine failed `silence is not
+  absence` (0 active vs 1). Removing timer-based OFF and separating `active` from
+  appearance `armed` state made it pass. Three fresh distinct successful negatives
+  spanning >=2000 capture ms rearm; two fresh positives flip; sustained positives
+  do not. The engine regression set deliberately replaces old expiry/cooldown
+  assertions with both modes, repeated cycles, serial 1400ms replies, invalid
+  captures, exact confidence/label checks, 1999/2000ms absence and 2499/2500ms gaps,
+  mixed-mode filter priority/cards and full reset.
+- Added editor/identifier Chromium tracer: old UI failed `mode is an explicit
+  editor choice` (no `#rule-mode`). It now passes with `toggle`/`present` options,
+  mode edit/save roundtrip, a confirmed target without rules or tracking, bounded
+  semantic expiry, independent latched ON/uncertain badge and mobile layout.
+- Added Chromium two-mode negative/reappearance cycles with 1400ms positives,
+  stable identifier node identity, and lifecycle/in-flight matrix for BOTH modes
+  (hidden, target/confidence, disable, Stop, source, edit, reset). Existing browser
+  expiry checks were deliberately migrated: silence/errors preserve Toggle ON,
+  not silently relaxed into accepting either state. Incoming stale-capture rejection
+  remains tested separately. Audio generations, safe cards and arbitration remain.
+
+Root design: the pure engine consumes only successful ordered capture evidence;
+`tick()` cannot change state. The same evidence tracker confirms semantic-only
+identifiers independently of action opt-in. `#target-identifiers` reconciles stable
+text nodes beside the preview, with <=4s last-capture semantics and independent
+rule mode/ON/OFF/armed state. No geometry, capture binding, replay, worker limits,
+server routes or network behavior changed. All verification uses local fixtures,
+not provider/user-device measurements. No push, deployment, restart or credentials.
+
+Verification on the completed application code:
+
+```sh
+INSTABOX_HEADLESS=1 /data/workspace/jev-live/.venv-test/bin/python -W error::ResourceWarning -m unittest discover -s tests -v
+# 60 tests passed, 280.069s, no skips
+node --test tests/*.test.mjs
+# 28 tests passed, no skips
+python3 artifacts/guard_slow_recognition.py
+# 16 files scanned relative to its b70f154 baseline; no findings, zero credential reads
+# tracker source/generated manifest hashes verified; live-secret comparison not run
+git diff --check
+# clean
+```
+
+Implementation milestones: `7374bdc` (pure evidence engine), `5b9b822` (editor,
+identifiers, browser regressions). Private HTTPS acceptance/deployment remains the
+parent's gate. The earlier credential-free publication guard is used separately;
+the credential-reading guards and private ignored probes are not modified/run.
+
+
+## Slow recognition — capture binding, cooperative replay, independent results
+
+All timings below are local Chromium fixtures, not real-provider or user-device
+measurements. Starting revision: `b70f154`; no credentials, provider requests,
+push, deployment, or restart.
+
+- **Root cause 1:** `detect()` drew/encoded a new snapshot, then tried the regular
+  throttled/busy sampler to obtain its frame ID. At ~12Hz and 1.4s responses this
+  often returned null (`capture-unavailable`). Reusing an old ID after drawing new
+  pixels was also not a safe association. The new browser regression observed a
+  null capture among three warmed responses before the fix. Afterward all warmed
+  images matched their submitted pixel-frame JPEG byte-for-byte. Recognition now
+  uses a recent (<350ms), exact already-submitted canvas and its original capture
+  timestamp, or takes an independent snapshot immediately if none is available.
+  It never waits for worker readiness/busy state. Request-start cadence and round
+  trip remain separate from pixel capture age.
+- **Root cause 2:** synchronous historical LK replay monopolized the only worker.
+  One frame remained in flight, so the UI could not submit intervening pixels;
+  subsequent capture gaps exceeded the existing 200ms evidence-gap bound. A real
+  OpenCV fixture with 12Hz sampling, a 1.4s seed delay, and 20ms added per replay
+  transition processed **zero frames during replay** before the fix. Cooperative
+  transitions now yield worker tasks; the fixture processed **8 frames during
+  ~640–657ms replay**, accepted the seed, displayed a fresh track, and had no
+  `frame-gap` losses. Replay catches up to the actual latest pixels before commit.
+- **Root cause 3:** `count`/`results` used the 350ms live geometry list instead of
+  semantic capture results. Valid 1.4s replies were invisible without a tracker.
+  `count` now counts thresholded last-capture semantic positives, capped by the
+  existing 4s capture TTL. `tracked-count` separately counts current measured
+  geometry; `age` shows last semantic capture age/Expired. Text explicitly says
+  captured recognition is not a current location. A uniform 12Hz stream and a
+  16s-loading worker both show semantic positives with zero live boxes, survive
+  worker failure, clear on a negative response, and expire at 4s. This test was
+  also rerun RED against the preceding commit with a verified playing fixture:
+  round trip 1.40–1.41s, capture age 2.1s, but count 0.
+- Worker failure suppresses previously stored geometry without deleting semantics
+  or invalidating a newer capture's in-flight recognition. The existing six-object
+  mixed/partial-texture regression and worker-failure lifecycle tests remain intact.
+- No queue/lifetime increases: one frame plus one seed operation in flight;
+  synchronous transitions stay indivisible; 2s replay wall budget (including
+  yields), 4s/128 frames/48MiB history, 350ms live geometry, 10s frame watchdog,
+  60s startup. Deadlines and evictions are rechecked after yields; no gray frames
+  are pinned. Reset cancels the old replay owner before any disposed Mat access;
+  a real-worker reset during replay reports zero obsolete replies and a new-source
+  track only. Partial trial geometry is never published.
+
+Final verification on the completed code:
+
+```sh
+INSTABOX_HEADLESS=1 /data/workspace/jev-live/.venv-test/bin/python -W error::ResourceWarning -m unittest discover -s tests -v
+# 57 tests passed, 244.150s
+node --test tests/*.test.mjs
+# 26 tests passed
+python3 artifacts/guard_slow_recognition.py
+# 10 changed tracked files, no static findings, source/generated SHA256 verified
+# Zero credential reads; no live-secret comparison (explicitly prohibited).
+git diff --check
+# clean
+```
+
+The existing ignored `publication_guard.py` and `guard_tracking.py` load real
+credentials; neither was executed. A credential-free adaptation applied their
+filename/private-host/token/dynamic-execution checks to this change and verified
+the generated tracker manifest. The original live-secret comparison remains a
+parent publication gate. Logs and the adapted guard are ignored local artifacts:
+`artifacts/slow-recognition-python-tests.log`, `slow-recognition-node-tests.log`,
+`slow-recognition-publication-scan.json`, and `guard_slow_recognition.py`.
+
+The first full run exposed two existing failure-geometry regressions after
+semantics were retained; adding a geometry-only capture cutoff preserved their
+original assertions without weakening tests. The subsequent full run above was
+clean. One initial uniform-camera fixture did not repaint its canvas and never
+reached video.play(); it was corrected to repaint at 12Hz, then replayed against
+the old app to establish a valid RED rather than treating startup as the symptom.
+
+Limits: one slow OpenCV transition can still block its worker; motion, occlusion,
+low texture, true capture gaps, history eviction or CPU limits can honestly reject
+tracking. Cooperative scheduling does not reduce provider latency or make a 1.4s
+serial request stream run at 4Hz. Capture history is not a live-position claim.
+
+
+## Visual Actions — opt-in semantic reactions (local fixtures only)
+
+Each implementation slice was run RED before GREEN and committed incrementally
+on `feat/visual-actions`, based on clean `8f0b742`:
+
+| Slice | Observed RED | Verified GREEN |
+|---|---|---|
+| Pure recognition trigger | engine export undefined | one positive never enters; two enter once; repeated positives do not repeat |
+| Grace and cooldown | active count 1 instead of 0 after absence | 1200 ms absence boundary, recovery before boundary, rearm after 2000 ms cooldown |
+| Capture freshness | duplicate capture activated (1 instead of 0) | distinct capture ordering, future/late rejection, 2500 ms expiry and streak reset |
+| Confidence / priority | non-finite confidence activated all three rules (3 instead of 0) | finite threshold/exact-label gate, first active filter wins, cards coexist |
+| Opt-in browser slice | missing master control (0 instead of 1) | explicit enable, pre-enable capture ignored, CSS video filter outlives 350 ms box expiry but not stale semantic evidence |
+| Validation / editor / cards | validator undefined; editor absent | bounded 12-rule CRUD, three idempotent presets, untouched targets, textContent-only card rendering, pre-edit capture ignored |
+| Optional audio | adapter undefined; permission control disabled | no context on load, explicit gesture + per-rule permission, one 160 ms voice, cancellation invalidates pending resume |
+| Bounded history | Clear log control absent | latest 40 timestamped enter/clear events, explicit history clear, reset does not delete rules |
+| Card accessibility | active card tabindex None instead of 0 | active bounded region keyboard/pointer-scrollable, no empty-card tab stop |
+
+Additional Chromium regressions cover Stop/source/hidden/target/disable late
+replies, 2.5 s action versus 4 s snapshot TTL, delayed actual WebAudio resume
+through Stop/hidden/disable, local HTTP gateway normalization into a filter,
+unfiltered native drawImage pixels, mobile overflow and reduced motion. The
+provider is never called. The native fake camera and semantic answers are fixtures,
+not real recognition accuracy or an audible-device test.
+
+Latest focused run: **8 Chromium Visual Actions tests passed**, with
+ResourceWarnings treated as errors; **23 Node tests passed** (including existing
+core/tracking tests, five action-engine tests and one audio test). A separate
+`test_server test_tracking_security test_camera_start` run passed **16 Python
+tests** and reported `evalBlocked`, `ready`, `fetchBlocked`, and `version` all true.
+Two existing snapshot/idle-browser regressions also passed earlier. Full project
+regression/deployment/review remains the parent's acceptance gate.
+
+Harness correction: a late semantic reply immediately schedules the next serial
+request, so polling its brief aria-busy=false gap was unreliable. The fixture now
+drains the reply promise/microtasks rather than requiring that transient DOM state.
+The initial absence recovery test was corrected to 1199 ms (1700 ms was exactly
+the 1200 ms expiry boundary), preserving the explicit >=1200 expiry contract.
+One early existing browser run emitted a server BrokenPipe while deliberately
+aborting the worker asset; later focused/security runs were clean. No deployment,
+restart, credential reads, push, or real-provider calls were performed.
+
 ## Tracking stability — bounded capture handoff (local, synthetic)
 
 - RED Node history: earliest retained frame was 85 instead of 0 after 101 frames at 30 Hz; byte-budget fixture retained 90 instead of 20.

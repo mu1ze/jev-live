@@ -1,13 +1,37 @@
 import {CompletionRate, FrameState, projectBox, snapshotSize} from './core.mjs';
 import {TrackingClient} from './tracking-client.mjs';
+import {ActionView} from './action-view.mjs';
+import {ControllerView} from './controller-view.mjs';
+const actions=new ActionView();
+const controller=new ControllerView();
 
 const $ = id => document.getElementById(id);
 const video=$('video'), photo=$('photo'), stage=$('stage');
+const actionMode=()=>$('workflow-mode').value==='actions';
+// Controller: on-device gesture tracking drives mini-games. No recognition requests.
+const controllerMode=()=>$('workflow-mode').value==='controller';
+function workflowUI() {
+  const active=actionMode(), game=controllerMode();
+  document.querySelector('.visual-actions').hidden=!active;
+  document.querySelectorAll('.tracking-details').forEach(node=>node.hidden=active||game);
+  $('target-identifiers').hidden=!active;
+  document.querySelectorAll('.controls > section').forEach(section=>section.hidden=game?section.id!=='controller-panel':section.id==='controller-panel');
+  document.querySelector('.telemetry').hidden=game;$('results').hidden=game;
+  document.querySelector('.controls').setAttribute('aria-label',game?'Controller settings':'Detection settings');
+  controller.activate(game);
+  if(game){text('workflow-description','Controller · play mini games with hand or head gestures. Tracking runs on this device: no frames are sent and no API key is needed.');return;}
+  text('confidence-help',active?'Only recognition at or above this threshold contributes to actions and target identifiers.':'Recognition seeds new tracks above this threshold. Supported pixel tracks survive weak recognition.');
+  text('cadence-help',active?'Recognition target · one request at a time · 640 px snapshots. Each request captures the native video directly; no tracking worker, pixel sampling or live boxes.':'Recognition target, not tracking FPS. One request at a time · 640 px snapshots. Local pixel tracking between requests; live recognition-only boxes expire after 350 ms from capture, still-image boxes after 4s. Tracks need revalidation within 10s.');
+  text('workflow-description',active?'Actions · image recognition only. Native preview and optional local reactions; no pixel tracking or box overlays.':'Detection and local pixel tracking · measured boxes between recognition requests. Actions do not run.');
+}
 const frame=new FrameState(4000), rate=new CompletionRate(5000);
 let running=false, pending=false, timer=null, stream=null, uploaded=null, photoURL=null;
-let sourceWidth=1, sourceHeight=1, serverKey=false, lastCapture=null;
+let sourceWidth=1, sourceHeight=1, serverKey=false, lastCapture=null, geometryCutoff=0;
 const boxNodes=new Map();
-const tracking=new TrackingClient(reason=>{if(reason==='failure'){frame.items=[];frame.captured=0;}if(running)render();});
+// A finished worker frame immediately submits the newest presented frame, so no
+// polling timer is needed to notice the worker became free.
+const tracking=new TrackingClient(reason=>{if(reason==='failure')geometryCutoff=Math.max(geometryCutoff,frame.captured);if(running){render();if(reason==='frame'||reason==='ready')sample();}});
+let samplingActive=false, sampleRetry=null;
 let sampleTimer=null, lastSample=0, lastVideoFrame=-1, presentedFrame=0, videoCallback=null;
 let lastTrackingCapture=null, qualityFrame=-1, qualityChanged=0;
 // Prefer actual presented frames; older MediaStream implementations may expose
@@ -17,7 +41,7 @@ function watchVideo() {
   presentedFrame=0;qualityFrame=-1;qualityChanged=0;
   if(typeof video.requestVideoFrameCallback!=='function')return;
   const next=()=>{
-    if(!running||source!==stream)return;
+    if(actionMode()||!running||source!==stream)return;
     presentedFrame++;sample();
     videoCallback=video.requestVideoFrameCallback(next);
   };
@@ -37,8 +61,7 @@ function videoFrame(now) {
 function trackingFrame(now) {
   if(!tracking.ready)return null;
   const mediaFrame=videoFrame(now);
-  if(mediaFrame!==null&&mediaFrame===lastVideoFrame)return now-lastSample<80?lastTrackingCapture:null;
-  if(mediaFrame===null||tracking.busy||now-lastSample+1<tracking.sampleInterval())return null;
+  if(mediaFrame===null||mediaFrame===lastVideoFrame||tracking.busy||now-lastSample+1<tracking.sampleInterval())return null;
   const capture=tracking.push(snapshotCanvas,snapshotContext,now);
   if(capture){lastSample=now;lastVideoFrame=mediaFrame;lastTrackingCapture=capture;}
   return capture;
@@ -51,10 +74,10 @@ function backoff() { failures=Math.min(failures+1,5); retryAt=performance.now()+
 function status(message, kind='') { text('status',message); const name=`state-badge ${kind}`; if($('badge').className!==name) $('badge').className=name; }
 function liveStatus() {
   if(document.hidden) return;
-  status('Camera live','live'); text('stage-note',`LIVE PREVIEW · ${tracking.state.toUpperCase()}`);
+  status('Camera live','live'); text('stage-note',controllerMode()?'LIVE PREVIEW · GESTURES TRACKED ON THIS DEVICE · NO FRAMES SENT':actionMode()?'LIVE PREVIEW · ACTIONS / RECOGNITION ONLY':`LIVE PREVIEW · ${tracking.state.toUpperCase()}`);
 }
-function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('age','—'); text('results','No detections yet. Camera mode can track visually supported objects.'); }
-function reset() { frame.reset();tracking.engaged=false;tracking.reset();lastVideoFrame=-1;lastTrackingCapture=null;lastSample=0; rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
+function clearBoxes() { frame.items=[]; for(const node of boxNodes.values()) node.remove(); boxNodes.clear(); text('count','0'); text('tracked-count','0'); text('age','—'); text('results',actionMode()?'No recognition yet. Actions use captured recognition only; no current locations.':'No detections yet. Camera mode can track visually supported objects.'); }
+function reset() { geometryCutoff=0;actions.reset();frame.reset();tracking.engaged=false;tracking.reset();lastVideoFrame=-1;lastTrackingCapture=null;lastSample=0; rate.reset(performance.now()); $('rate').textContent='0.0 /s'; clearBoxes(); clearTimeout(timer); timer=null; }
 function fail(message) { clearBoxes(); $('error').textContent=message; $('error').hidden=false; status('Needs attention'); }
 function clearError() { $('error').hidden=true; $('error').textContent=''; }
 function credentials() {
@@ -64,10 +87,20 @@ function credentials() {
   return {key:$('key').value.trim(),labels};
 }
 function updateButtons() { $('start').disabled=running; $('analyze').disabled=!uploaded || pending || running; }
-function stop() {
+function stopTracking() {
   if(videoCallback!==null)video.cancelVideoFrameCallback?.(videoCallback);
-  videoCallback=null;
-  running=false; clearInterval(sampleTimer);sampleTimer=null;tracking.close();reset(); $('results').setAttribute('aria-busy','false');
+  videoCallback=null;samplingActive=false;
+  clearInterval(sampleTimer);sampleTimer=null;clearTimeout(sampleRetry);sampleRetry=null;tracking.close();
+}
+function startTracking() {
+  if(actionMode()||controllerMode()||!running||!stream||samplingActive)return;
+  samplingActive=true;watchVideo();tracking.start();
+  // Presented-frame callbacks and worker replies drive sampling. A 20 ms poll is
+  // only needed by browsers without requestVideoFrameCallback.
+  if(typeof video.requestVideoFrameCallback!=='function')sampleTimer=setInterval(sample,20);
+}
+function stop() {
+  running=false;stopTracking();reset();controller.detach(); $('results').setAttribute('aria-busy','false');
   if(stream) stream.getTracks().forEach(track=>track.stop());
   stream=null; video.srcObject=null;
   $('empty').hidden=!!uploaded; video.hidden=true; photo.hidden=!uploaded;
@@ -76,10 +109,22 @@ function stop() {
   status('Stopped'); clearError(); updateButtons();
 }
 const snapshotCanvas=document.createElement('canvas');
-const snapshotContext=snapshotCanvas.getContext('2d');
-function snapshot(source,w,h) {
-  drawSnapshot(source,w,h);
-  return snapshotCanvas.toDataURL('image/jpeg',.82).split(',')[1];
+// Tracking reads these pixels back up to 30 times a second; a CPU-backed canvas
+// avoids a GPU readback stall on every getImageData.
+const snapshotContext=snapshotCanvas.getContext('2d',{willReadFrequently:true});
+const encodeError=()=>new Error('Could not encode the camera frame. Try again.');
+function encodeSnapshot() {
+  // toBlob copies the current pixels synchronously, then JPEG-encodes off the
+  // main thread, so the preview and pixel sampling never stall on encoding.
+  const encoded=new Promise((resolve,reject)=>snapshotCanvas.toBlob(blob=>{
+    if(!blob){reject(encodeError());return;}
+    const reader=new FileReader();
+    reader.onload=()=>resolve(reader.result.slice(reader.result.indexOf(',')+1));
+    reader.onerror=()=>reject(encodeError());
+    reader.readAsDataURL(blob);
+  },'image/jpeg',.82));
+  encoded.catch(()=>{}); // awaited by the request; never an unhandled rejection
+  return encoded;
 }
 function drawSnapshot(source,w,h) {
   const size=snapshotSize(w,h);
@@ -88,24 +133,28 @@ function drawSnapshot(source,w,h) {
   snapshotContext.drawImage(source,0,0,size.width,size.height);
 }
 function sample() {
-  if(!running||document.hidden||!tracking.ready||tracking.busy||video.readyState<2)return;
+  if(actionMode()||controllerMode()||!running||document.hidden||!tracking.ready||tracking.busy||video.readyState<2)return;
   const now=performance.now();
-  if(now-lastSample+1<tracking.sampleInterval())return;
+  const mediaFrame=videoFrame(now);
+  if(mediaFrame===null||mediaFrame===lastVideoFrame)return;
+  const wait=tracking.sampleInterval()-(now-lastSample+1);
+  // Too soon for the adaptive cadence: wake once when it is due instead of polling.
+  if(wait>0){if(sampleRetry===null)sampleRetry=setTimeout(()=>{sampleRetry=null;sample();},wait);return;}
   try {drawSnapshot(video,video.videoWidth,video.videoHeight);trackingFrame(now);}
   catch {tracking.failure();}
 }
 function schedule() {
   clearTimeout(timer);
-  if(running && stream && !pending && !document.hidden) {
+  if(running && stream && !pending && !document.hidden && !controllerMode()) {
     const elapsed=lastCapture===null?Infinity:performance.now()-lastCapture;
     timer=setTimeout(()=>detect(false),Math.max(0,Number($('cadence').value)-elapsed,retryAt-performance.now()));
   }
 }
 async function detect(single) {
-  if(pending || (!single && (!running || document.hidden))) return;
+  if(pending || (!single && (!running || document.hidden || controllerMode()))) return;
   if(!single && performance.now()<retryAt) {schedule();return;}
-  const epoch=frame.epoch;
-  let payload,capture=null,captured;
+  const epoch=frame.epoch, actionGeneration=actions.generation;
+  let payload,capture=null,captured,encoded,timeout;
   try {
     payload=credentials();
     if(!single && video.readyState<2) { schedule(); return; }
@@ -113,16 +162,32 @@ async function detect(single) {
     sourceWidth=single?photo.naturalWidth:video.videoWidth;
     sourceHeight=single?photo.naturalHeight:video.videoHeight;
     captured=performance.now();
-    payload.image=snapshot(source,sourceWidth,sourceHeight); payload.format='jpg';
-    if(!single)capture=trackingFrame(performance.now());
+    // Encode the exact most recently submitted pixels, not a newly drawn image
+    // paired with an unrelated/throttled capture ID. Never wait for the worker.
+    if(!actionMode()&&!single&&tracking.ready&&lastTrackingCapture?.generation===tracking.generation&&captured-lastTrackingCapture.timestamp<350) {
+      capture=lastTrackingCapture;captured=capture.timestamp;
+      encoded=encodeSnapshot();
+    } else {
+      lastTrackingCapture=null;
+      drawSnapshot(source,sourceWidth,sourceHeight);encoded=encodeSnapshot();
+      if(!actionMode()&&!single&&tracking.ready&&!tracking.busy) {
+        capture=tracking.push(snapshotCanvas,snapshotContext,captured);
+        if(capture){lastSample=captured;lastVideoFrame=videoFrame(captured);lastTrackingCapture=capture;}
+      }
+    }
+    payload.format='jpg';
   } catch(e) { backoff(); fail(e.message); schedule(); return; }
-  lastCapture=captured;
+  lastCapture=performance.now();
   pending=true; updateButtons(); clearError(); $('results').setAttribute('aria-busy','true');
   if(single) {status('Asking Jev…','busy');text('stage-note','ANALYZING SELECTED IMAGE');}
   else liveStatus();
   const controller=new AbortController();
-  const timeout=setTimeout(()=>controller.abort(),28000);
   try {
+    payload.image=await encoded;
+    // Stop, source or target changes during encoding: never send that frame.
+    if(epoch!==frame.epoch||(!single&&!running))return;
+    const requestStarted=performance.now();
+    timeout=setTimeout(()=>controller.abort(),28000);
     const response=await fetch('api/detect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal,credentials:'same-origin',cache:'no-store'});
     const data=await response.json();
     if(!response.ok) throw new Error(data.error || 'Detection failed. Please try again.');
@@ -130,22 +195,23 @@ async function detect(single) {
     failures=0; retryAt=0;
     if(epoch!==frame.epoch) return;
     const now=performance.now();
+    if(actionMode())actions.accept(data.detections,captured,now,actionGeneration,Number($('confidence').value));
     if(!single) rate.record(now);
-    $('latency').textContent=`${((now-captured)/1000).toFixed(2)} s`;
+    $('latency').textContent=`${((now-requestStarted)/1000).toFixed(2)} s`;
     if(frame.accept(epoch,data.detections,captured,now)) {
-      if(!single)tracking.seed(capture,data.detections,Number($('confidence').value));
-      if(single) {status('Image analyzed','live');text('stage-note','SNAPSHOT RESULT · EXPIRES 4s AFTER CAPTURE');}
+      if(!actionMode()&&!single)tracking.seed(capture,data.detections,Number($('confidence').value));
+      if(single) {status('Image analyzed','live');text('stage-note',actionMode()?'RECOGNITION ONLY · RESULT EXPIRES 4s AFTER CAPTURE':'SNAPSHOT RESULT · EXPIRES 4s AFTER CAPTURE');}
       else liveStatus();
       render(true);
     } else {
-      if(single||!tracking.current(now).length)clearBoxes();
+      if(actionMode()||single||!tracking.current(now).length)clearBoxes();
       if(single) {status('Result too old');text('stage-note','RESULT EXPIRED · PREVIEW IS NOT TRACKING');}
     }
   } catch(e) {
     backoff();
     if(epoch===frame.epoch) {
       const message=e.name==='AbortError'?'Request timed out. Automatic retries are slowed down.':(e.message || 'Connection failed. Try again.');
-      if(!single&&tracking.current(performance.now()).length){text('error',message);$('error').hidden=false;liveStatus();}
+      if(!actionMode()&&!single&&tracking.current(performance.now()).length){text('error',message);$('error').hidden=false;liveStatus();}
       else fail(message);
     }
   } finally {
@@ -154,22 +220,27 @@ async function detect(single) {
   }
 }
 async function start() {
-  try {credentials();} catch(e) {fail(e.message);return;}
+  const game=controllerMode();
+  if(!game)try {credentials();} catch(e) {fail(e.message);return;}
   stop(); clearError(); running=true; const epoch=frame.epoch;
+  let openingStream=null;
   status('Opening camera…','busy'); updateButtons();
   try {
     if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera requires HTTPS or localhost. You can use image upload instead.');
-    const next=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720},facingMode:'environment'},audio:false});
+    const next=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720},facingMode:game?'user':'environment'},audio:false});
     if(epoch!==frame.epoch || !running) {next.getTracks().forEach(t=>t.stop());return;}
-    stream=next; video.srcObject=stream; video.hidden=false; photo.hidden=true; $('empty').hidden=true;
+    openingStream=next;stream=next; video.srcObject=stream; video.hidden=false; photo.hidden=true; $('empty').hidden=true;
+    // Install source cleanup before play() yields: workflow epochs may change
+    // during playback startup without replacing this retained camera stream.
+    next.getVideoTracks()[0].addEventListener('ended',()=>{if(running&&stream===next){stop();fail('Camera disconnected. Reconnect and Start again.');}});
     await video.play();
-    if(epoch!==frame.epoch || !running) return;
-    $('source-label').textContent='LIVE CAMERA'; liveStatus();
-    watchVideo();tracking.start();sampleTimer=setInterval(sample,20);
-    stream.getVideoTracks()[0].addEventListener('ended',()=>{if(running){stop();fail('Camera disconnected. Reconnect and Start again.');}});
+    if(stream!==next || !running) return;
+    $('source-label').textContent=game?'FRONT CAMERA · ON DEVICE · NOTHING SENT':'LIVE CAMERA'; liveStatus();
+    if(game){controller.attach();return;}
+    startTracking();
     detect(false);
   } catch(e) {
-    if(epoch!==frame.epoch) return;
+    if(epoch!==frame.epoch&&(!openingStream||stream!==openingStream)) return;
     stop(); fail(e.name==='NotAllowedError'?'Camera permission denied. Allow camera access or use an image.':e.name==='NotFoundError'?'No camera found. Choose an image below instead.':e.message);
   }
 }
@@ -197,11 +268,14 @@ async function upload() {
 }
 function render() {
   const now=performance.now();
-  const tracks=running&&!document.hidden?tracking.current(now):[];
-  const items=document.hidden?[]:running?frame.liveVisible(now,Number($('confidence').value),tracks,tracking.lossCutoffs):frame.visible(now,Number($('confidence').value));
+  if(actionMode())actions.tick(now);
+  const tracks=!actionMode()&&running&&!document.hidden?tracking.current(now):[];
+  // Worker failure invalidates prior geometry, not independent semantic results
+  // or a newer capture whose recognition request is already in flight.
+  const items=actionMode()||document.hidden?[]:running?(frame.captured<=geometryCutoff?tracks:frame.liveVisible(now,Number($('confidence').value),tracks,tracking.lossCutoffs)):frame.visible(now,Number($('confidence').value));
   if(running&&!document.hidden)liveStatus();
   text('rate',`${rate.value(now).toFixed(1)} /s`);
-  if($('tracking-details').parentElement.open) {
+  if(!actionMode()&&$('tracking-details').parentElement.open) {
     const d=tracking.diagnostics(now), counts=c=>Object.entries(c).map(([k,v])=>`${k}: ${v}`).join(', ')||'none';
     text('tracking-diagnostics',`Local only · rolling 5s · since source reset\nsample ${d.sampleHz.toFixed(1)} Hz · complete ${d.completionHz.toFixed(1)} Hz\nworker ${d.processingMs.toFixed(1)} ms · replay ${d.replayMs.toFixed(1)} ms\ncadence ${d.intervalMs.toFixed(0)} ms · history ${(d.historyMs/1000).toFixed(2)} s / ${d.historyFrames} frames / ${(d.historyBytes/1048576).toFixed(1)} MiB\nseed rejects: ${counts(d.rejects)}\ntrack losses: ${counts(d.losses)}`);
   }
@@ -227,8 +301,12 @@ function render() {
     if(label.textContent!==caption) label.textContent=caption;
     style(label,'bottom',dims.top<27?'auto':''); style(label,'top',dims.top<27?'0px':'');
   }
-  text('count',String(items.length));
-  text('results',items.length?items.map(d=>`${d.label} · ${Math.round(d.confidence*100)}% recognition · ${d.tracked?'pixel tracking':'snapshot only'}`).join('   /   '):frame.captured?'No fresh detections above threshold.':'No detections yet. Camera mode can track visually supported objects.');
+  const recognized=document.hidden?[]:frame.visible(now,Number($('confidence').value));
+  text('count',String(recognized.length));
+  text('tracked-count',String(items.filter(d=>d.tracked).length));
+  if(actionMode())actions.identifiers(recognized,frame.captured,now);
+  const fresh=frame.captured&&now-frame.captured<frame.ttl;
+  text('results',recognized.length?`Last recognized · ${recognized.map(d=>`${d.label} · ${Math.round(d.confidence*100)}% recognition`).join('   /   ')} · captured result, not current location; expires 4s after capture.`:fresh?'Last recognition · No detections above threshold.':frame.captured?'Last recognition expired · awaiting a fresh result.':actionMode()?'No recognition yet. Actions use captured recognition only; no current locations.':'No detections yet. Camera mode can track visually supported objects.');
   if(frame.captured) {
     const age=now-frame.captured;
     text('age',age<frame.ttl?`${(age/1000).toFixed(1)} s`:'Expired');
@@ -236,6 +314,20 @@ function render() {
   }
 }
 $('tracking-details').parentElement.addEventListener('toggle',()=>render());
+let workflow=$('workflow-mode').value;
+$('workflow-mode').addEventListener('change',()=>{
+  const was=workflow;workflow=$('workflow-mode').value;
+  // The controller uses the front camera and sends nothing; switching to or
+  // from it releases the camera so the other workflow starts from a clean slate.
+  if(was!==workflow&&(was==='controller'||workflow==='controller')){const live=running;if(live)stop();workflowUI();if(live)status('Workflow updated · Start camera');return;}
+  // A permission promise has no stream to retain. Cancel its epoch and let the
+  // late result stop its tracks, just like editing targets while opening camera.
+  if(running&&!stream){stop();workflowUI();status('Workflow updated · Start camera');return;}
+  stopTracking();reset();workflowUI();
+  if(running&&stream){startTracking();if(!pending)schedule();}
+  render();
+});
+workflowUI();
 $('start').addEventListener('click',start);
 $('stop').addEventListener('click',stop);
 $('upload').addEventListener('change',upload);
@@ -247,9 +339,10 @@ $('labels').addEventListener('input',()=>{
   reset();clearError();
   if(running){liveStatus();if(!pending)schedule();}
 });
-$('confidence').addEventListener('input',()=>{$('confidence-value').value=`${Math.round(Number($('confidence').value)*100)}%`;render(true);});
+$('confidence').addEventListener('input',()=>{actions.reset();$('confidence-value').value=`${Math.round(Number($('confidence').value)*100)}%`;render(true);});
 $('cadence').addEventListener('change',()=>{if(running && !pending)schedule();});
 document.addEventListener('visibilitychange',()=>{
+  actions.reset();
   clearTimeout(timer); timer=null;
   if(running) {
     if(document.hidden) {frame.reset();tracking.reset();clearBoxes();status('Paused · tab hidden');$('stage-note').textContent='TAB HIDDEN · NEW SNAPSHOTS PAUSED';}

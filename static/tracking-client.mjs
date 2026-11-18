@@ -24,7 +24,7 @@ export class TrackingClient {
       worker.onmessageerror=()=>{if(worker===this.worker)this.failure('worker-message-error');};
       worker.onmessage=({data:m})=>{
         if(worker!==this.worker)return;
-        if(m.type==='ready'){clearTimeout(this.loadTimer);this.ready=true;this.state='pixel tracker ready';this.onchange();return;}
+        if(m.type==='ready'){clearTimeout(this.loadTimer);this.ready=true;this.state='pixel tracker ready';this.onchange('ready');return;}
         if(m.type==='failure'){
           if(m.generation!==undefined&&m.generation!==this.generation)return;
           const code=['frame-processing-error','seed-replay-error','reset-error'].includes(m.code)?m.code:'worker-processing-error';
@@ -38,7 +38,7 @@ export class TrackingClient {
             const elapsed=Math.max(0,now-this.busySince);
             this.turnaround=this.turnaround?this.turnaround*.8+elapsed*.2:elapsed;
             this.processingMs=Number.isFinite(m.processingMs)?Math.max(0,Math.min(10000,m.processingMs)):0;
-          } else this.replayMs=Number.isFinite(m.seedResult?.replayMs)?Math.max(0,Math.min(10000,m.seedResult.replayMs)):0;
+          } else {this.seeding=false;this.replayMs=Number.isFinite(m.seedResult?.replayMs)?Math.max(0,Math.min(10000,m.seedResult.replayMs)):0;}
           this.workerStats=m.diagnostics||this.workerStats;
           this.workerStats=this.diagnostics(now); // discard all non-allowlisted fields immediately
           // Loss time is measured capture time, never semantic response arrival.
@@ -48,7 +48,7 @@ export class TrackingClient {
           for(const [label,cutoff] of this.lossCutoffs)if(now-cutoff>=350)this.lossCutoffs.delete(label);
           this.tracks=m.tracks;this.lastMeasured=m.measured||0;if(this.tracks.length)this.engaged=true;
           this.state=this.tracks.length?'measured pixel tracking':'no supported pixel tracks · snapshot detection';
-          this.onchange();
+          this.onchange(m.type);
         }
       };
     } catch(e) {this.failure('worker-construction-error',this.errorDetail(e));}
@@ -61,7 +61,7 @@ export class TrackingClient {
     return category+line;
   }
   failure(code='frame-capture-error',detail='') {this.close();this.failureCode=code;this.failureDetail=detail;this.state=`tracker unavailable · snapshot fallback · ${code}${detail?' · '+detail:''}`;this.onchange('failure');}
-  reset() {this.clearDiagnostics();this.generation++;this.tracks=[];this.lossCutoffs.clear();this.busy=false;this.lastMeasured=0;this.worker?.postMessage({type:'reset'});this.onchange();}
+  reset() {this.clearDiagnostics();this.generation++;this.tracks=[];this.lossCutoffs.clear();this.busy=false;this.seeding=false;this.lastMeasured=0;this.worker?.postMessage({type:'reset'});this.onchange();}
   close() {clearTimeout(this.loadTimer);this.worker?.terminate();this.worker=null;this.ready=false;this.reset();}
   push(canvas,context,timestamp) {
     if(!this.ready||this.busy)return null;
@@ -80,6 +80,8 @@ export class TrackingClient {
     if(!this.ready){this.reject('worker-not-ready');return;}
     if(performance.now()-capture.timestamp>=4000){this.reject('capture-too-old');return;}
     const seeds=detections.filter(d=>d.confidence>=threshold).map(d=>({label:d.label,confidence:d.confidence,box:[d.box.left,d.box.top,d.box.right-d.box.left,d.box.bottom-d.box.top]}));
+    if(this.seeding){this.reject('seed-busy');return;}
+    this.seeding=true;
     this.worker.postMessage({type:'seed',...capture,detections:seeds});
   }
   current(now) {

@@ -30,12 +30,13 @@ class PixelTracker {
   // normalized [x,y,width,height], stamped at *capture* frame; replay pixel evidence to latest frame.
   diagnostics() { return {historyFrames:this.frames.length,historyBytes:this.frames.length*this.width*this.height,historyMs:this.frames.length?this.frames.at(-1).timestampMs-this.frames[0].timestampMs:0,rejects:{...this.rejects},losses:{...this.losses}}; }
   counted(result) { for(const {reason} of result.rejected)this.rejects[reason]=Math.min(1e9,(this.rejects[reason]||0)+1);return result; }
-  seed(frameId, detections) {
+  seed(frameId, detections) {const steps=this.seedSteps(frameId,detections);let r;do{r=steps.next();}while(!r.done);return r.value;}
+  *seedSteps(frameId, detections) {
     const capture=this.frames.find(f=>f.frameId===frameId);
     if(!capture) return this.counted({accepted:[],rejected:detections.map(d=>({label:d.label,reason:frameId<=this.budgetEvicted?'capture-history-budget':'capture-frame-expired'})),replayMs:0});
     const trial=new PixelTracker(this.cv,this.width,this.height,{maxTracks:this.maxTracks,maxGapMs:this.maxGapMs,maxTrackAgeMs:this.maxTrackAgeMs});
     trial.frames=this.frames; trial.serial=this.serial;
-    const result=trial.seedRaw(frameId,detections);this.serial=trial.serial;
+    const result=yield* trial.seedRawSteps(frameId,detections);this.serial=Math.max(this.serial,trial.serial);
     const overlap=(a,b)=>{const w=Math.max(0,Math.min(a[0]+a[2],b[0]+b[2])-Math.max(a[0],b[0])),h=Math.max(0,Math.min(a[1]+a[3],b[1]+b[3])-Math.max(a[1],b[1]));return w*h/(a[2]*a[3]+b[2]*b[3]-w*h);};
     const accepted=[];
     for(const t of trial.tracks.values()) {
@@ -56,7 +57,8 @@ class PixelTracker {
     this.frames.at(-1).tracks=this.snapshot();
     return this.counted({...result,accepted});
   }
-  seedRaw(frameId, detections) {
+  seedRaw(frameId, detections) {const steps=this.seedRawSteps(frameId,detections);let r;do{r=steps.next();}while(!r.done);return r.value;}
+  *seedRawSteps(frameId, detections) {
     const i=this.frames.findIndex(f=>f.frameId===frameId);
     if(i<0) return {accepted:[],rejected:detections.map(d=>({label:d.label,reason:'capture-frame-expired'})),replayMs:0};
     const start=performance.now(), accepted=[], rejected=[], fresh=[], cv=this.cv;
@@ -80,14 +82,25 @@ class PixelTracker {
       if(points.length<6) { rejected.push({label:d.label,reason:'insufficient-texture'}); continue; }
       const t={id:`track-${++this.serial}`,label:d.label,box,points,seedTimestampMs:this.frames[i].timestampMs}; this.tracks.set(t.id,t); fresh.push(t); accepted.push(t.id);
     }
-    for(let k=i+1;k<this.frames.length;k++) {
-      const prev=this.frames[k-1], next=this.frames[k];
+    let replayFrameId=frameId;
+    while(fresh.some(t=>this.tracks.has(t.id))) {
+      // Look up again after each yield: bounded history can shift/evict meanwhile.
+      const k=this.frames.findIndex(f=>f.frameId===replayFrameId);
+      if(k<0) {for(const t of fresh.filter(t=>this.tracks.has(t.id)))this.lose(t,'capture-frame-expired',replayFrameId);break;}
+      if(k===this.frames.length-1)break;
+      const prev=this.frames[k], next=this.frames[k+1];
       if(next.timestampMs-prev.timestampMs>this.maxGapMs) for(const t of fresh.filter(t=>this.tracks.has(t.id))) this.lose(t,'replay-gap',next.frameId);
       this.advance(prev,next,fresh.filter(t=>this.tracks.has(t.id)));
-      // Never publish an intermediate replay position as present-time evidence.
-      // CPU budget is checked between indivisible OpenCV transitions.
+      replayFrameId=next.frameId;
+      // Never publish intermediate replay positions. Yield to new pixel messages;
+      // no pinned gray frames, additional frame queues, or extended CPU budget.
       if(performance.now()-start>=2000) {
         for(const t of fresh.filter(t=>this.tracks.has(t.id)))this.lose(t,'replay-budget',next.frameId);
+        break;
+      }
+      yield;
+      if(performance.now()-start>=2000) {
+        for(const t of fresh.filter(t=>this.tracks.has(t.id)))this.lose(t,'replay-budget',replayFrameId);
         break;
       }
     }
